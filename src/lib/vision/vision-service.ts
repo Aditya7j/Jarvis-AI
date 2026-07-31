@@ -37,10 +37,6 @@ function getActiveSources(): Array<"webcam" | "screen"> {
   return sources;
 }
 
-function getActiveStream(): MediaStream | null {
-  return screenStream ?? webcamStream;
-}
-
 function getActiveSource(): "webcam" | "screen" | null {
   if (webcamStream) return "webcam";
   if (screenStream) return "screen";
@@ -182,14 +178,6 @@ function getVisionFrames(): VisionImage[] {
   return frames;
 }
 
-function getLatestVisionFrame(): VisionFrame | null {
-  return webcamFrame ?? screenFrame;
-}
-
-function hasLiveFrames(): boolean {
-  return webcamFrame !== null || screenFrame !== null;
-}
-
 async function startWebcam(): Promise<boolean> {
   const store = getStore();
   try {
@@ -288,9 +276,5 @@ export const visionService = {
   stopAll,
   captureFrame,
   isAnyActive,
-  getActiveSource,
-  getActiveStream,
   getVisionFrames,
-  getLatestVisionFrame,
-  hasLiveFrames,
 };

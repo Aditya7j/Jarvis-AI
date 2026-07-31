@@ -1,4 +1,5 @@
-import { aiService, AIError, toErrorPayload } from "@/lib/ai";
+import { aiService } from "@/lib/ai";
+import { invalidRequest } from "@/lib/api-helpers";
 import type { ProviderName } from "@/lib/ai";
 
 export const runtime = "nodejs";
@@ -17,38 +18,17 @@ export async function POST(request: Request): Promise<Response> {
   try {
     body = (await request.json()) as { provider?: unknown; apiKey?: unknown };
   } catch {
-    return Response.json(
-      {
-        error: toErrorPayload(
-          new AIError("Invalid JSON request body.", "INVALID_REQUEST")
-        ),
-      },
-      { status: 400 }
-    );
+    return invalidRequest("Invalid JSON request body.");
   }
 
   if (!isRuntimeProvider(body.provider)) {
-    return Response.json(
-      {
-        error: toErrorPayload(
-          new AIError("Unknown provider.", "INVALID_REQUEST")
-        ),
-      },
-      { status: 400 }
-    );
+    return invalidRequest("Unknown provider.");
   }
 
   const apiKey =
     typeof body.apiKey === "string" ? body.apiKey.trim() : "";
   if (!apiKey) {
-    return Response.json(
-      {
-        error: toErrorPayload(
-          new AIError("API key cannot be empty.", "INVALID_REQUEST")
-        ),
-      },
-      { status: 400 }
-    );
+    return invalidRequest("API key cannot be empty.");
   }
 
   aiService.configureProvider(body.provider, apiKey);
@@ -61,25 +41,11 @@ export async function DELETE(request: Request): Promise<Response> {
   try {
     body = (await request.json()) as { provider?: unknown };
   } catch {
-    return Response.json(
-      {
-        error: toErrorPayload(
-          new AIError("Invalid JSON request body.", "INVALID_REQUEST")
-        ),
-      },
-      { status: 400 }
-    );
+    return invalidRequest("Invalid JSON request body.");
   }
 
   if (!isRuntimeProvider(body.provider)) {
-    return Response.json(
-      {
-        error: toErrorPayload(
-          new AIError("Unknown provider.", "INVALID_REQUEST")
-        ),
-      },
-      { status: 400 }
-    );
+    return invalidRequest("Unknown provider.");
   }
 
   aiService.clearProvider(body.provider);

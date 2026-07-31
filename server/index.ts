@@ -3,7 +3,6 @@ import cors from "@fastify/cors";
 import fastifyWebsocket from "@fastify/websocket";
 import { conversationRoutes } from "./routes/conversation";
 import { visionRoutes } from "./routes/vision";
-import { memoryRoutes } from "./routes/memory";
 import { sttRoutes } from "./routes/stt";
 import { aiService, APP_VERSION } from "../src/lib/ai";
 
@@ -22,7 +21,6 @@ async function main() {
 
   await server.register(conversationRoutes, { prefix: "/api/conversation" });
   await server.register(visionRoutes, { prefix: "/api/vision" });
-  await server.register(memoryRoutes, { prefix: "/api/memory" });
   await server.register(sttRoutes, { prefix: "/api/stt" });
 
   server.get("/health", async () => {

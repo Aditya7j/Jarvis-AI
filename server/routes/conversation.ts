@@ -1,5 +1,11 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import { aiService, toErrorPayload } from "../../src/lib/ai";
+
+function invalidRequest(reply: FastifyReply, message: string) {
+  return reply.code(400).send({
+    error: { code: "INVALID_REQUEST", message },
+  });
+}
 
 export const conversationRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post("/message", async (request, reply) => {
@@ -9,9 +15,7 @@ export const conversationRoutes: FastifyPluginAsync = async (fastify) => {
     };
 
     if (!message || !message.trim()) {
-      return reply.code(400).send({
-        error: { code: "INVALID_REQUEST", message: "No message provided." },
-      });
+      return invalidRequest(reply, "No message provided.");
     }
 
     try {

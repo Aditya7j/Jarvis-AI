@@ -287,14 +287,6 @@ export class AIProviderService {
     throw lastError ?? new AIError("No vision-capable AI provider is available.", "NO_PROVIDER", "unknown");
   }
 
-  hasVisionProvider(): boolean {
-    return this.candidates().some(
-      (provider) =>
-        provider.supportsVision() &&
-        typeof provider.generateVisionChat === "function"
-    );
-  }
-
   async generateVisionChat(
     request: VisionChatRequest,
     options: { trackFailures?: boolean } = {}

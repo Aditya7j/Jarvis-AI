@@ -1,7 +1,6 @@
 import OpenAI from "openai";
 import { AIError, mapOpenAIError } from "../errors";
 import { withTimeout } from "../http";
-import { aiLogger } from "../logger";
 import type {
   AIMessageInput,
   GenerateTextOptions,
@@ -10,48 +9,31 @@ import type {
   VisionChatRequest,
   VisionRequest,
 } from "../types";
-import type { AIProvider } from "./types";
+import { BaseProvider, type ProviderConfig } from "./base";
+import { checkProviderHealth } from "./health";
 
-interface OpenAIProviderConfig {
-  apiKey: string | null;
-  model: string;
-  timeoutMs: number;
-  healthTimeoutMs: number;
-}
-
-export class OpenAIProvider implements AIProvider {
+export class OpenAIProvider extends BaseProvider<OpenAI> {
   readonly name: ProviderName = "openai";
 
-  private readonly client: OpenAI | null;
-  private readonly modelName: string;
-  private readonly timeoutMs: number;
-  private readonly healthTimeoutMs: number;
-  private readonly log = aiLogger.child("openai");
-
-  constructor(config: OpenAIProviderConfig) {
-    this.modelName = config.model;
-    this.timeoutMs = config.timeoutMs;
-    this.healthTimeoutMs = config.healthTimeoutMs;
-    this.client = config.apiKey
-      ? new OpenAI({ apiKey: config.apiKey, timeout: config.timeoutMs, maxRetries: 2 })
-      : null;
+  constructor(config: ProviderConfig) {
+    super(
+      config,
+      config.apiKey
+        ? new OpenAI({
+            apiKey: config.apiKey,
+            timeout: config.timeoutMs,
+            maxRetries: 2,
+          })
+        : null,
+      "openai"
+    );
     if (this.client) {
-      this.log.info("OpenAI initialized (API key detected)", { model: this.modelName });
+      this.log.info("OpenAI initialized (API key detected)", {
+        model: this.modelName,
+      });
     } else {
       this.log.warn("OpenAI not initialized (no API key)");
     }
-  }
-
-  isConfigured(): boolean {
-    return this.client !== null;
-  }
-
-  getModel(): string | null {
-    return this.client ? this.modelName : null;
-  }
-
-  supportsVision(): boolean {
-    return this.isConfigured();
   }
 
   private toOpenAIMessages(messages: AIMessageInput[]) {
@@ -232,42 +214,21 @@ export class OpenAIProvider implements AIProvider {
   }
 
   async healthCheck(): Promise<ProviderStatusDetail> {
-    if (!this.client) {
-      return {
-        provider: "openai",
-        status: "not_configured",
-        configured: false,
-        model: null,
-        error: null,
-        latencyMs: null,
-        vision: true,
-      };
-    }
-    const startedAt = Date.now();
-    try {
-      const page = await withTimeout(this.client.models.list(), this.healthTimeoutMs, "OpenAI");
-      void page.data;
-      return {
-        provider: "openai",
-        status: "connected",
-        configured: true,
-        model: this.modelName,
-        error: null,
-        latencyMs: Date.now() - startedAt,
-        vision: true,
-      };
-    } catch (error) {
-      const mapped = mapOpenAIError(error);
-      return {
-        provider: "openai",
-        status: "error",
-        configured: true,
-        model: this.modelName,
-        error: mapped.message,
-        latencyMs: Date.now() - startedAt,
-        vision: true,
-      };
-    }
+    return checkProviderHealth({
+      provider: "openai",
+      configured: this.isConfigured(),
+      model: this.getModel(),
+      vision: true,
+      ping: async () => {
+        const page = await withTimeout(
+          this.client!.models.list(),
+          this.healthTimeoutMs,
+          "OpenAI"
+        );
+        void page.data;
+      },
+      messageFor: (error) => mapOpenAIError(error).message,
+    });
   }
 
   async listModels(): Promise<string[]> {

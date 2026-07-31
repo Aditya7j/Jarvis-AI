@@ -1,4 +1,5 @@
-import { aiService, AIError, toErrorPayload } from "@/lib/ai";
+import { aiService, toErrorPayload } from "@/lib/ai";
+import { invalidRequest, jsonError } from "@/lib/api-helpers";
 import { isAbortError } from "@/lib/ai/errors";
 import { aiLogger } from "@/lib/ai/logger";
 import { DEFAULT_SYSTEM_PROMPT, VISION_CONTEXT_PROMPT } from "@/lib/ai/prompts";
@@ -165,14 +166,7 @@ export async function POST(request: Request): Promise<Response> {
   try {
     body = (await request.json()) as ChatRequestBody;
   } catch {
-    return Response.json(
-      {
-        error: toErrorPayload(
-          new AIError("Invalid JSON request body.", "INVALID_REQUEST")
-        ),
-      },
-      { status: 400 }
-    );
+    return invalidRequest("Invalid JSON request body.");
   }
 
   const messages = (body.messages ?? [])
@@ -186,14 +180,7 @@ export async function POST(request: Request): Promise<Response> {
     .filter((m) => m.content.length > 0);
 
   if (messages.length === 0) {
-    return Response.json(
-      {
-        error: toErrorPayload(
-          new AIError("No message content provided.", "INVALID_REQUEST")
-        ),
-      },
-      { status: 400 }
-    );
+    return invalidRequest("No message content provided.");
   }
 
   const options = { messages, model: body.model };
@@ -323,7 +310,7 @@ export async function POST(request: Request): Promise<Response> {
       });
       return Response.json({ text });
     } catch (error) {
-      return Response.json({ error: toErrorPayload(error) }, { status: 502 });
+      return jsonError(error, 502);
     }
   }
 

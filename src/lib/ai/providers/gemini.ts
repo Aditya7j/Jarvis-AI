@@ -1,7 +1,6 @@
 import { GoogleGenerativeAI, type Content, type GenerativeModel } from "@google/generative-ai";
 import { AIError, mapGeminiError } from "../errors";
 import { withTimeout } from "../http";
-import { aiLogger } from "../logger";
 import type {
   AIMessageInput,
   GenerateTextOptions,
@@ -10,46 +9,25 @@ import type {
   VisionChatRequest,
   VisionRequest,
 } from "../types";
-import type { AIProvider } from "./types";
+import { BaseProvider, type ProviderConfig } from "./base";
+import { checkProviderHealth } from "./health";
 
-interface GeminiProviderConfig {
-  apiKey: string | null;
-  model: string;
-  timeoutMs: number;
-  healthTimeoutMs: number;
-}
-
-export class GeminiProvider implements AIProvider {
+export class GeminiProvider extends BaseProvider<GoogleGenerativeAI> {
   readonly name: ProviderName = "gemini";
 
-  private readonly client: GoogleGenerativeAI | null;
-  private readonly modelName: string;
-  private readonly timeoutMs: number;
-  private readonly healthTimeoutMs: number;
-  private readonly log = aiLogger.child("gemini");
-
-  constructor(config: GeminiProviderConfig) {
-    this.modelName = config.model;
-    this.timeoutMs = config.timeoutMs;
-    this.healthTimeoutMs = config.healthTimeoutMs;
-    this.client = config.apiKey ? new GoogleGenerativeAI(config.apiKey) : null;
+  constructor(config: ProviderConfig) {
+    super(
+      config,
+      config.apiKey ? new GoogleGenerativeAI(config.apiKey) : null,
+      "gemini"
+    );
     if (this.client) {
-      this.log.info("Gemini initialized (API key detected)", { model: this.modelName });
+      this.log.info("Gemini initialized (API key detected)", {
+        model: this.modelName,
+      });
     } else {
       this.log.warn("Gemini not initialized (no API key)");
     }
-  }
-
-  isConfigured(): boolean {
-    return this.client !== null;
-  }
-
-  getModel(): string | null {
-    return this.client ? this.modelName : null;
-  }
-
-  supportsVision(): boolean {
-    return this.isConfigured();
   }
 
   private instance(): GenerativeModel {
@@ -240,42 +218,16 @@ export class GeminiProvider implements AIProvider {
   }
 
   async healthCheck(): Promise<ProviderStatusDetail> {
-    if (!this.client) {
-      return {
-        provider: "gemini",
-        status: "not_configured",
-        configured: false,
-        model: null,
-        error: null,
-        latencyMs: null,
-        vision: true,
-      };
-    }
-    const startedAt = Date.now();
-    try {
-      const model = this.instance();
-      await withTimeout(model.generateContent("ping"), this.healthTimeoutMs, "Gemini");
-      return {
-        provider: "gemini",
-        status: "connected",
-        configured: true,
-        model: this.modelName,
-        error: null,
-        latencyMs: Date.now() - startedAt,
-        vision: true,
-      };
-    } catch (error) {
-      const mapped = mapGeminiError(error);
-      return {
-        provider: "gemini",
-        status: "error",
-        configured: true,
-        model: this.modelName,
-        error: mapped.message,
-        latencyMs: Date.now() - startedAt,
-        vision: true,
-      };
-    }
+    return checkProviderHealth({
+      provider: "gemini",
+      configured: this.isConfigured(),
+      model: this.getModel(),
+      vision: true,
+      ping: async () => {
+        await withTimeout(this.instance().generateContent("ping"), this.healthTimeoutMs, "Gemini");
+      },
+      messageFor: (error) => mapGeminiError(error).message,
+    });
   }
 
   async listModels(): Promise<string[]> {

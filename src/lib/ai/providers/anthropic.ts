@@ -1,7 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { AIError, mapAnthropicError } from "../errors";
 import { withTimeout } from "../http";
-import { aiLogger } from "../logger";
 import type {
   AIMessageInput,
   GenerateTextOptions,
@@ -10,14 +9,8 @@ import type {
   VisionChatRequest,
   VisionRequest,
 } from "../types";
-import type { AIProvider } from "./types";
-
-interface AnthropicProviderConfig {
-  apiKey: string | null;
-  model: string;
-  timeoutMs: number;
-  healthTimeoutMs: number;
-}
+import { BaseProvider, type ProviderConfig } from "./base";
+import { checkProviderHealth } from "./health";
 
 type AnthropicVisionContent =
   | string
@@ -37,39 +30,28 @@ type AnthropicVisionContent =
         }
     >;
 
-export class AnthropicProvider implements AIProvider {
+export class AnthropicProvider extends BaseProvider<Anthropic> {
   readonly name: ProviderName = "anthropic";
 
-  private readonly client: Anthropic | null;
-  private readonly modelName: string;
-  private readonly timeoutMs: number;
-  private readonly healthTimeoutMs: number;
-  private readonly log = aiLogger.child("anthropic");
-
-  constructor(config: AnthropicProviderConfig) {
-    this.modelName = config.model;
-    this.timeoutMs = config.timeoutMs;
-    this.healthTimeoutMs = config.healthTimeoutMs;
-    this.client = config.apiKey
-      ? new Anthropic({ apiKey: config.apiKey, timeout: config.timeoutMs, maxRetries: 2 })
-      : null;
+  constructor(config: ProviderConfig) {
+    super(
+      config,
+      config.apiKey
+        ? new Anthropic({
+            apiKey: config.apiKey,
+            timeout: config.timeoutMs,
+            maxRetries: 2,
+          })
+        : null,
+      "anthropic"
+    );
     if (this.client) {
-      this.log.info("Anthropic initialized (API key detected)", { model: this.modelName });
+      this.log.info("Anthropic initialized (API key detected)", {
+        model: this.modelName,
+      });
     } else {
       this.log.warn("Anthropic not initialized (no API key)");
     }
-  }
-
-  isConfigured(): boolean {
-    return this.client !== null;
-  }
-
-  getModel(): string | null {
-    return this.client ? this.modelName : null;
-  }
-
-  supportsVision(): boolean {
-    return this.isConfigured();
   }
 
   private splitSystem(messages: AIMessageInput[]): {
@@ -281,49 +263,24 @@ export class AnthropicProvider implements AIProvider {
   }
 
   async healthCheck(): Promise<ProviderStatusDetail> {
-    if (!this.client) {
-      return {
-        provider: "anthropic",
-        status: "not_configured",
-        configured: false,
-        model: null,
-        error: null,
-        latencyMs: null,
-        vision: true,
-      };
-    }
-    const startedAt = Date.now();
-    try {
-      await withTimeout(
-        this.client.messages.create({
-          model: this.modelName,
-          max_tokens: 1,
-          messages: [{ role: "user", content: "ping" }],
-        }),
-        this.healthTimeoutMs,
-        "Anthropic"
-      );
-      return {
-        provider: "anthropic",
-        status: "connected",
-        configured: true,
-        model: this.modelName,
-        error: null,
-        latencyMs: Date.now() - startedAt,
-        vision: true,
-      };
-    } catch (error) {
-      const mapped = mapAnthropicError(error);
-      return {
-        provider: "anthropic",
-        status: "error",
-        configured: true,
-        model: this.modelName,
-        error: mapped.message,
-        latencyMs: Date.now() - startedAt,
-        vision: true,
-      };
-    }
+    return checkProviderHealth({
+      provider: "anthropic",
+      configured: this.isConfigured(),
+      model: this.getModel(),
+      vision: true,
+      ping: async () => {
+        await withTimeout(
+          this.client!.messages.create({
+            model: this.modelName,
+            max_tokens: 1,
+            messages: [{ role: "user", content: "ping" }],
+          }),
+          this.healthTimeoutMs,
+          "Anthropic"
+        );
+      },
+      messageFor: (error) => mapAnthropicError(error).message,
+    });
   }
 
   async listModels(): Promise<string[]> {

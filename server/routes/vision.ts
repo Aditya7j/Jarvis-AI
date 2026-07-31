@@ -1,5 +1,11 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import { aiService, toErrorPayload } from "../../src/lib/ai";
+
+function invalidImage(reply: FastifyReply, message: string) {
+  return reply.code(400).send({
+    error: { code: "INVALID_REQUEST", message },
+  });
+}
 
 export const visionRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post("/analyze", async (request, reply) => {
@@ -9,9 +15,7 @@ export const visionRoutes: FastifyPluginAsync = async (fastify) => {
     };
 
     if (!image || typeof image !== "string") {
-      return reply.code(400).send({
-        error: { code: "INVALID_REQUEST", message: "No image provided." },
-      });
+      return invalidImage(reply, "No image provided.");
     }
 
     try {
@@ -32,9 +36,7 @@ export const visionRoutes: FastifyPluginAsync = async (fastify) => {
     const { image } = request.body as { image?: string };
 
     if (!image || typeof image !== "string") {
-      return reply.code(400).send({
-        error: { code: "INVALID_REQUEST", message: "No image provided." },
-      });
+      return invalidImage(reply, "No image provided.");
     }
 
     try {

@@ -60,10 +60,6 @@ export class AIClient {
     return this.health?.provider ?? "none";
   }
 
-  get summary(): HealthSummary | null {
-    return this.health;
-  }
-
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(path, init);
     const body = (await res.json().catch(() => null)) as
@@ -105,11 +101,6 @@ export class AIClient {
     this.lastRefreshAt = Date.now();
     this.notify();
     return this.health;
-  }
-
-  async checkOllama(): Promise<boolean> {
-    const health = await this.refresh();
-    return health.ollama.status === "connected";
   }
 
   async generateResponse(
@@ -201,51 +192,35 @@ export class AIClient {
     }
   }
 
-  async analyzeVision(imageBase64: string, prompt?: string): Promise<string> {
-    const body = await this.request<{ description: string }>("/api/vision/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: imageBase64, prompt }),
-    });
-    return body.description;
+  private async updateProviderHealth(
+    provider: "gemini" | "openai" | "anthropic",
+    method: "POST" | "DELETE",
+    apiKey?: string
+  ): Promise<HealthSummary> {
+    const body = await this.request<{ health: HealthSummary }>(
+      "/api/settings/provider",
+      {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(apiKey ? { provider, apiKey } : { provider }),
+      }
+    );
+    this.health = body.health;
+    this.notify();
+    return body.health;
   }
 
   async setApiKey(
     provider: "gemini" | "openai" | "anthropic",
     apiKey: string
   ): Promise<HealthSummary> {
-    const body = await this.request<{ health: HealthSummary }>(
-      "/api/settings/provider",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, apiKey }),
-      }
-    );
-    this.health = body.health;
-    this.notify();
-    return body.health;
+    return this.updateProviderHealth(provider, "POST", apiKey);
   }
 
   async clearProvider(
     provider: "gemini" | "openai" | "anthropic"
   ): Promise<HealthSummary> {
-    const body = await this.request<{ health: HealthSummary }>(
-      "/api/settings/provider",
-      {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider }),
-      }
-    );
-    this.health = body.health;
-    this.notify();
-    return body.health;
-  }
-
-  async listModels(): Promise<string[]> {
-    const body = await this.request<{ models: string[] }>("/api/models");
-    return body.models;
+    return this.updateProviderHealth(provider, "DELETE");
   }
 }
 

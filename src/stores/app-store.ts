@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import type { AIState, AIMessage, Conversation } from "@/types";
 
 interface AppStore {
   sidebarOpen: boolean;

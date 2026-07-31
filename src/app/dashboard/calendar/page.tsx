@@ -1,17 +1,15 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { Sidebar } from "@/components/layout/sidebar";
+import { DashboardPageFrame } from "../_components/dashboard-page-frame";
 import { GlassCard } from "@/components/ui/glass-card";
-import { useAppStore } from "@/stores/app-store";
 import { cn } from "@/lib/utils";
-import { Calendar as CalendarIcon, ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
 const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const days = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
 export default function CalendarPage() {
-  const sidebarOpen = useAppStore((s) => s.sidebarOpen);
   const [date, setDate] = useState(new Date());
   const [events, setEvents] = useState<Record<string, string[]>>({});
 
@@ -25,9 +23,8 @@ export default function CalendarPage() {
   const nextMonth = useCallback(() => setDate(new Date(year, month + 1, 1)), [year, month]);
 
   return (
-    <div className="min-h-screen bg-black">
-      <Sidebar />
-      <div className={cn("transition-all duration-300 min-h-screen", sidebarOpen ? "ml-[280px]" : "ml-0")}>
+    <DashboardPageFrame>
+      <div>
         <header className="border-b border-white/[0.03] bg-black/60 backdrop-blur-xl px-6 py-3">
           <h1 className="text-sm text-white/60">Calendar</h1>
         </header>
@@ -77,6 +74,6 @@ export default function CalendarPage() {
           </GlassCard>
         </main>
       </div>
-    </div>
+    </DashboardPageFrame>
   );
 }

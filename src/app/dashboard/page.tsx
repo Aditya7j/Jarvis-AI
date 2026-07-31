@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Sidebar } from "@/components/layout/sidebar";
+import { DashboardPageFrame } from "./_components/dashboard-page-frame";
 import { GlassCard } from "@/components/ui/glass-card";
 import { useAppStore } from "@/stores/app-store";
 import { useConversationStore } from "@/stores/conversation-store";
@@ -230,20 +230,12 @@ function MemorySnapshot() {
 }
 
 export default function DashboardPage() {
-  const sidebarOpen = useAppStore((s) => s.sidebarOpen);
   const toggleSidebar = useAppStore((s) => s.toggleSidebar);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
 
   return (
-    <div className="min-h-screen bg-black">
-      <Sidebar />
-
-      <div
-        className={cn(
-          "transition-all duration-300",
-          sidebarOpen ? "ml-[280px]" : "ml-0"
-        )}
-      >
+    <DashboardPageFrame>
+      <div>
         <header className="sticky top-0 z-20 border-b border-white/[0.03] bg-black/60 backdrop-blur-xl">
           <div className="flex items-center justify-between px-6 h-14">
             <div className="flex items-center gap-4">
@@ -277,28 +269,26 @@ export default function DashboardPage() {
         </header>
 
         <main className="p-6">
-          <div>
-            <div className="mb-6">
-              <h1 className="text-2xl font-semibold text-white/90">
-                Good{" "}
-                {new Date().getHours() < 12 ? "morning" : "afternoon"}
-              </h1>
-              <p className="text-sm text-white/30 mt-1">
-                Your AI companion is ready.
-              </p>
-            </div>
+          <div className="mb-6">
+            <h1 className="text-2xl font-semibold text-white/90">
+              Good{" "}
+              {new Date().getHours() < 12 ? "morning" : "afternoon"}
+            </h1>
+            <p className="text-sm text-white/30 mt-1">
+              Your AI companion is ready.
+            </p>
+          </div>
 
-            <div className="grid grid-cols-4 gap-4">
-              <TimeWidget />
-              <AIStateWidget />
-              <QuickActions />
-              <SystemStatus />
-              <RecentActivity />
-              <MemorySnapshot />
-            </div>
+          <div className="grid grid-cols-4 gap-4">
+            <TimeWidget />
+            <AIStateWidget />
+            <QuickActions />
+            <SystemStatus />
+            <RecentActivity />
+            <MemorySnapshot />
           </div>
         </main>
       </div>
-    </div>
+    </DashboardPageFrame>
   );
 }

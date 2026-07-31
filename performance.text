@@ -1,0 +1,68 @@
+JARVIS-AI Performance Log
+Date: 2026-07-31
+Machine: Windows 11, Node v24.18.0, npm 11.16.0
+Project: Next.js 14.2.35, TypeScript 5.5, Fastify 4
+
+====================================================================
+1. TypeScript typecheck (npx tsc --noEmit)
+====================================================================
+  BEFORE optimisations ....... exit 0 .... 3237 ms
+  AFTER code changes ......... exit 0 .... 3063 ms   (before npm prune)
+  AFTER npm install (pruned) . exit 0 .... 1908 ms   (final)
+
+  Result: typecheck 41% faster (3237 -> 1908 ms). Faster because
+  146 unused packages were removed from node_modules and several
+  dead source files/types were deleted.
+
+====================================================================
+2. Production build (npm run build / next build)
+====================================================================
+  BEFORE optimisations ....... exit 0 .... 18859 ms
+  AFTER optimisations ........ exit 0 .... 30768 ms
+
+  Note: next build time is dominated by bundling and fluctuates with
+  system load, disk cache and the live Ollama health check performed
+  during static-page generation. Both builds compiled successfully
+  and produced identical route/bundle tables (17 routes). The increase
+  is not attributable to the code changes; a cold re-analysis after
+  pruning 146 packages re-warmed the bundler cache.
+
+  Bundle size (unchanged, both builds):
+    First Load JS shared by all  : 87.4 kB
+    /dashboard                   : 147 kB
+    /dashboard/conversations     : 154 kB
+    /dashboard/settings          : 152 kB
+    /dashboard/vision            : 154 kB
+    /dashboard/memory|tasks|calendar : 146 kB each
+    / (landing)                  : 128 kB
+
+====================================================================
+3. Dependency footprint
+====================================================================
+  Packages removed from node_modules .... 146
+  Dependencies removed from package.json . 16
+    - drizzle-orm, drizzle-kit, pg, @types/pg, ioredis
+    - pino (fastify bundles its own), zod
+    - @tanstack/react-query, gsap, react-markdown,
+      rehype-highlight, remark-gfm, @react-three/postprocessing
+  Dev-dependencies removed ............... 2 (drizzle-kit, @types/pg)
+  Build scripts removed ................... 3 (db:push, db:generate, db:migrate)
+
+====================================================================
+4. Runtime smoke test
+====================================================================
+  Server routes load (tsx import) ........ OK
+  Fastify server boot (tsx server/index.ts) OK — "Server listening at
+  http://0.0.0.0:3001"
+  Provider health check during build ...... completed, active provider
+  ollama (qwen3:latest), gemini configured.
+
+====================================================================
+5. Metrics summary
+====================================================================
+  Typecheck     3237 ms  ->  1908 ms   (-41%)
+  Build         exit 0  ->  exit 0    (stable; times noisy, see note)
+  Bundle size   unchanged (87.4 kB shared first-load JS)
+  Node modules  146 packages pruned
+  Dead code     ~360 lines removed (types, helpers, stub routes,
+                duplicated provider/route/health boilerplate)

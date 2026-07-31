@@ -1,16 +1,13 @@
 "use client";
 
-import { Sidebar } from "@/components/layout/sidebar";
+import { DashboardPageFrame } from "../_components/dashboard-page-frame";
 import { VoiceInterface } from "@/components/voice/voice-interface";
-import { useAppStore } from "@/stores/app-store";
 import { conversationManager } from "@/lib/ai/conversation-manager";
-import { cn } from "@/lib/utils";
 import { Bot, WifiOff, Cpu } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ProviderName } from "@/lib/ai/types";
 
 export default function ConversationsPage() {
-  const sidebarOpen = useAppStore((s) => s.sidebarOpen);
   const [aiReady, setAiReady] = useState(false);
   const [provider, setProvider] = useState<ProviderName | "none">("none");
 
@@ -37,14 +34,8 @@ export default function ConversationsPage() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-black">
-      <Sidebar />
-      <div
-        className={cn(
-          "transition-all duration-300 h-screen flex flex-col",
-          sidebarOpen ? "ml-[280px]" : "ml-0"
-        )}
-      >
+    <DashboardPageFrame>
+      <div className="h-screen flex flex-col">
         <header className="border-b border-white/[0.03] bg-black/60 backdrop-blur-xl px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h1 className="text-sm text-white/60">Conversations</h1>
@@ -77,6 +68,6 @@ export default function ConversationsPage() {
         </header>
         <VoiceInterface />
       </div>
-    </div>
+    </DashboardPageFrame>
   );
 }

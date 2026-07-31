@@ -1,12 +1,5 @@
 export type ProviderName = "gemini" | "openai" | "anthropic" | "ollama";
 
-export const PROVIDER_LABELS: Record<ProviderName, string> = {
-  gemini: "Gemini",
-  openai: "OpenAI",
-  anthropic: "Anthropic",
-  ollama: "Ollama",
-};
-
 export type ChatRole = "system" | "user" | "assistant";
 
 export interface AIMessageInput {

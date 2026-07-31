@@ -1,4 +1,5 @@
-import { aiService, AIError, toErrorPayload } from "@/lib/ai";
+import { aiService } from "@/lib/ai";
+import { invalidRequest, jsonError } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 
@@ -7,25 +8,11 @@ export async function POST(request: Request): Promise<Response> {
   try {
     body = (await request.json()) as { image?: string; prompt?: string; mimeType?: string };
   } catch {
-    return Response.json(
-      {
-        error: toErrorPayload(
-          new AIError("Invalid JSON request body.", "INVALID_REQUEST")
-        ),
-      },
-      { status: 400 }
-    );
+    return invalidRequest("Invalid JSON request body.");
   }
 
   if (!body.image || typeof body.image !== "string") {
-    return Response.json(
-      {
-        error: toErrorPayload(
-          new AIError("No image provided.", "INVALID_REQUEST")
-        ),
-      },
-      { status: 400 }
-    );
+    return invalidRequest("No image provided.");
   }
 
   try {
@@ -36,6 +23,6 @@ export async function POST(request: Request): Promise<Response> {
     });
     return Response.json({ description, timestamp: Date.now() });
   } catch (error) {
-    return Response.json({ error: toErrorPayload(error) }, { status: 502 });
+    return jsonError(error, 502);
   }
 }

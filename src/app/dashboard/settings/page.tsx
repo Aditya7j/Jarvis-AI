@@ -1,8 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { Sidebar } from "@/components/layout/sidebar";
-import { useAppStore } from "@/stores/app-store";
+import { DashboardPageFrame } from "../_components/dashboard-page-frame";
 import { cn } from "@/lib/utils";
 import { GlassCard } from "@/components/ui/glass-card";
 import { Button } from "@/components/ui/button";
@@ -26,34 +25,36 @@ const PROVIDER_ROWS: ProviderRow[] = [
   { key: "ollama", label: "Ollama (Local)", connectedLabel: "Running", disconnectedLabel: "Not Running" },
 ];
 
+const PROVIDER_BY_KEY = new Map(PROVIDER_ROWS.map((row) => [row.key, row]));
+
 function providerStatus(health: HealthSummary | null, key: ProviderKey) {
   const detail: ProviderStatusDetail | undefined = health?.[key];
+  const row = PROVIDER_BY_KEY.get(key);
   if (!detail) {
     return { text: "Checking...", color: "text-white/30", error: null };
   }
   if (detail.status === "connected") {
     return {
-      text: PROVIDER_ROWS.find((r) => r.key === key)?.connectedLabel ?? "Connected",
+      text: row?.connectedLabel ?? "Connected",
       color: "text-green-400",
       error: null,
     };
   }
   if (detail.status === "error") {
     return {
-      text: PROVIDER_ROWS.find((r) => r.key === key)?.disconnectedLabel ?? "Not Connected",
+      text: row?.disconnectedLabel ?? "Not Connected",
       color: "text-red-400/80",
       error: detail.error,
     };
   }
   return {
-    text: PROVIDER_ROWS.find((r) => r.key === key)?.disconnectedLabel ?? "Not Connected",
+    text: row?.disconnectedLabel ?? "Not Connected",
     color: "text-white/30",
     error: null,
   };
 }
 
 export default function SettingsPage() {
-  const sidebarOpen = useAppStore((s) => s.sidebarOpen);
   const [health, setHealth] = useState<HealthSummary | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [keySaved, setKeySaved] = useState(false);
@@ -104,14 +105,8 @@ export default function SettingsPage() {
   const isGeminiConnected = health?.gemini.status === "connected";
   const isOllamaConnected = health?.ollama.status === "connected";
   const activeProviderLabel =
-    health?.provider === "gemini"
-      ? "Gemini"
-      : health?.provider === "ollama"
-      ? "Ollama"
-      : health?.provider === "openai"
-      ? "OpenAI"
-      : health?.provider === "anthropic"
-      ? "Anthropic"
+    health?.provider && health.provider !== "none"
+      ? PROVIDER_BY_KEY.get(health.provider)?.label ?? "None"
       : "None";
 
   const sections = useMemo(() => {
@@ -197,9 +192,8 @@ export default function SettingsPage() {
   );
 
   return (
-    <div className="min-h-screen bg-black">
-      <Sidebar />
-      <div className={cn("transition-all duration-300 min-h-screen", sidebarOpen ? "ml-[280px]" : "ml-0")}>
+    <DashboardPageFrame>
+      <div>
         <header className="border-b border-white/[0.03] bg-black/60 backdrop-blur-xl px-6 py-3">
           <h1 className="text-sm text-white/60">Settings</h1>
         </header>
@@ -304,6 +298,6 @@ export default function SettingsPage() {
           )}
         </main>
       </div>
-    </div>
+    </DashboardPageFrame>
   );
 }

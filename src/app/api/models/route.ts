@@ -1,4 +1,5 @@
-import { aiService, toErrorPayload } from "@/lib/ai";
+import { aiService } from "@/lib/ai";
+import { jsonError } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 
@@ -7,6 +8,6 @@ export async function GET(): Promise<Response> {
     const result = await aiService.listModels();
     return Response.json(result);
   } catch (error) {
-    return Response.json({ error: toErrorPayload(error) }, { status: 502 });
+    return jsonError(error, 502);
   }
 }

@@ -49,8 +49,12 @@ function getSpeechRecognitionAPI():
   return w.SpeechRecognition || w.webkitSpeechRecognition || null;
 }
 
+function stripWakeWord(text: string): string {
+  return text.replace(new RegExp(`^${WAKE_WORD}`, "i"), "").trim();
+}
+
 function isInterruptPhrase(text: string): boolean {
-  const cleaned = text.replace(new RegExp(`^${WAKE_WORD}`, "i"), "").trim();
+  const cleaned = stripWakeWord(text);
   return INTERRUPT_PHRASES.includes(text) || INTERRUPT_PHRASES.includes(cleaned);
 }
 
@@ -180,9 +184,7 @@ export function useVoice() {
           }
         } else {
           if (!listeningModeRef.current) {
-            const cleaned = result
-              .replace(new RegExp(`^${WAKE_WORD}`, "i"), "")
-              .trim();
+            const cleaned = stripWakeWord(result);
             setInterimTranscript(cleaned || result);
           }
         }
