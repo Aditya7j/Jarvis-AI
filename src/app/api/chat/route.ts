@@ -214,7 +214,7 @@ export async function POST(request: Request): Promise<Response> {
           mimeType: frame.mimeType,
           prompt: VISION_CONTEXT_PROMPT,
         },
-        { trackFailures: false }
+        { trackFailures: false, includeMemory: false }
       );
       log.info("Vision context generated", {
         requestId,

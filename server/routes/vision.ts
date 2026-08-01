@@ -40,11 +40,14 @@ export const visionRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
-      const text = await aiService.generateVision({
-        imageBase64: image,
-        prompt:
-          "Extract all text from this image. Return only the extracted text, preserving layout order.",
-      });
+      const text = await aiService.generateVision(
+        {
+          imageBase64: image,
+          prompt:
+            "Extract all text from this image. Return only the extracted text, preserving layout order.",
+        },
+        { includeMemory: false }
+      );
       return {
         text,
         timestamp: Date.now(),

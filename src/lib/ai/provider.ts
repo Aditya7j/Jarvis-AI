@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import { loadEnvConfig, type EnvConfig } from "./config";
 import { AIError, isAbortError, toAIError } from "./errors";
 import { aiLogger } from "./logger";
+import { appendMemoryContext, memoryService } from "../memory";
 import { DEFAULT_SYSTEM_PROMPT } from "./prompts";
 import { clearRuntimeKey, getRuntimeKey, setRuntimeKey } from "./registry";
 import { AnthropicProvider } from "./providers/anthropic";
@@ -11,6 +12,7 @@ import { OpenAIProvider } from "./providers/openai";
 import type { AIProvider } from "./providers/types";
 import { APP_VERSION } from "./version";
 import type {
+  AIMessageInput,
   GenerateTextOptions,
   HealthSummary,
   ProviderName,
@@ -152,8 +154,28 @@ export class AIProviderService {
     };
   }
 
+  private async withMemoryContext<T extends { messages?: AIMessageInput[] }>(
+    options: T
+  ): Promise<T> {
+    const context = await memoryService.buildContext();
+    if (!context) return options;
+    const messages = appendMemoryContext(options.messages ?? [], context);
+    return { ...options, messages };
+  }
+
+  private async withMemoryPrompt(request: VisionRequest): Promise<VisionRequest> {
+    const context = await memoryService.buildContext();
+    if (!context) return request;
+    const prompt =
+      request.prompt?.trim() ||
+      "Describe what you see in this image in detail.";
+    return { ...request, prompt: `${context}\n\n${prompt}` };
+  }
+
   async generateText(options: GenerateTextOptions): Promise<string> {
-    const requestOptions = this.withSystemContext(options);
+    const requestOptions = await this.withMemoryContext(
+      this.withSystemContext(options)
+    );
     const candidates = this.candidates();
     if (candidates.length === 0) {
       throw new AIError(this.noProviderMessage, "NO_PROVIDER", "unknown");
@@ -194,7 +216,9 @@ export class AIProviderService {
   }
 
   async *streamText(options: GenerateTextOptions): AsyncGenerator<string> {
-    const requestOptions = this.withSystemContext(options);
+    const requestOptions = await this.withMemoryContext(
+      this.withSystemContext(options)
+    );
     const candidates = this.candidates();
     if (candidates.length === 0) {
       throw new AIError(this.noProviderMessage, "NO_PROVIDER", "unknown");
@@ -241,9 +265,13 @@ export class AIProviderService {
 
   async generateVision(
     request: VisionRequest,
-    options: { trackFailures?: boolean } = {}
+    options: { trackFailures?: boolean; includeMemory?: boolean } = {}
   ): Promise<string> {
     const trackFailures = options.trackFailures ?? true;
+    const requestWithMemory =
+      options.includeMemory === false
+        ? request
+        : await this.withMemoryPrompt(request);
     const candidates = this.candidates().filter((provider) =>
       provider.supportsVision()
     );
@@ -263,7 +291,7 @@ export class AIProviderService {
         model: provider.getModel(),
       });
       try {
-        const text = await provider.generateVision(request);
+        const text = await provider.generateVision(requestWithMemory);
         if (trackFailures) {
           this.markSuccess(provider.name);
         }
@@ -292,6 +320,7 @@ export class AIProviderService {
     options: { trackFailures?: boolean } = {}
   ): Promise<string> {
     const trackFailures = options.trackFailures ?? false;
+    const requestWithMemory = await this.withMemoryContext(request);
     const candidates = this.candidates().filter(
       (provider) =>
         provider.supportsVision() &&
@@ -313,7 +342,7 @@ export class AIProviderService {
         model: provider.getModel(),
       });
       try {
-        const text = await provider.generateVisionChat!(request);
+        const text = await provider.generateVisionChat!(requestWithMemory);
         if (trackFailures) {
           this.markSuccess(provider.name);
         }
@@ -352,6 +381,7 @@ export class AIProviderService {
     options: { trackFailures?: boolean } = {}
   ): AsyncGenerator<string> {
     const trackFailures = options.trackFailures ?? false;
+    const requestWithMemory = await this.withMemoryContext(request);
     const candidates = this.candidates().filter(
       (provider) =>
         provider.supportsVision() &&
@@ -373,7 +403,7 @@ export class AIProviderService {
         model: provider.getModel(),
       });
       try {
-        const stream = provider.streamVisionChat!(request);
+        const stream = provider.streamVisionChat!(requestWithMemory);
         const first = await stream.next();
         if (first.done) {
           if (trackFailures) {

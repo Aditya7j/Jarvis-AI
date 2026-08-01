@@ -14,6 +14,7 @@ import {
   Calendar,
   CheckSquare,
   HardDrive,
+  User,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
@@ -26,6 +27,7 @@ const navItems = [
   { icon: Eye, label: "Vision", href: "/dashboard/vision" },
   { icon: CheckSquare, label: "Tasks", href: "/dashboard/tasks" },
   { icon: Calendar, label: "Calendar", href: "/dashboard/calendar" },
+  { icon: User, label: "Profile", href: "/dashboard/profile" },
   { icon: HardDrive, label: "Memory", href: "/dashboard/memory" },
   { icon: Settings, label: "Settings", href: "/dashboard/settings" },
 ];
@@ -121,10 +123,13 @@ export function Sidebar() {
             </div>
 
             <div className="p-3 border-t border-white/[0.05]">
-              <button className="flex items-center gap-2 w-full px-3 py-2 rounded-xl text-xs text-white/20 hover:text-white/40 hover:bg-white/[0.03] transition-all">
+              <Link
+                href="/dashboard/memory"
+                className="flex items-center gap-2 w-full px-3 py-2 rounded-xl text-xs text-white/20 hover:text-white/40 hover:bg-white/[0.03] transition-all"
+              >
                 <Search className="w-3 h-3" />
                 Search memory...
-              </button>
+              </Link>
             </div>
           </div>
         </motion.aside>

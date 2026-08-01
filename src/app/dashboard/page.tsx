@@ -5,6 +5,8 @@ import { DashboardPageFrame } from "./_components/dashboard-page-frame";
 import { GlassCard } from "@/components/ui/glass-card";
 import { useAppStore } from "@/stores/app-store";
 import { useConversationStore } from "@/stores/conversation-store";
+import { memoryClient } from "@/lib/memory/client";
+import type { MemoryEntry } from "@/lib/memory/types";
 import {
   Menu,
   MessageSquare,
@@ -204,6 +206,29 @@ function RecentActivity() {
 }
 
 function MemorySnapshot() {
+  const [memories, setMemories] = useState<MemoryEntry[] | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    memoryClient
+      .getSnapshot()
+      .then((snapshot) => {
+        if (!active) return;
+        setMemories(
+          snapshot.entries
+            .filter((entry) => entry.status === "approved")
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .slice(0, 3)
+        );
+      })
+      .catch(() => {
+        if (active) setMemories([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   return (
     <GlassCard variant="interactive" className="p-4 col-span-2">
       <div className="flex items-center gap-2 mb-4">
@@ -211,19 +236,23 @@ function MemorySnapshot() {
         <span className="text-xs text-white/40">MEMORY HIGHLIGHTS</span>
       </div>
       <div className="space-y-2">
-        {[
-          "Working on JARVIS AI OS project",
-          "Using TypeScript & Next.js 14",
-          "Prefers dark mode interfaces",
-        ].map((memory, i) => (
-          <div
-            key={i}
-            className="flex items-start gap-2 text-sm text-white/50"
-          >
-            <span className="text-purple-400/50 mt-0.5">•</span>
-            <span>{memory}</span>
-          </div>
-        ))}
+        {memories === null ? (
+          <p className="text-sm text-white/30">Loading memories...</p>
+        ) : memories.length === 0 ? (
+          <p className="text-sm text-white/30">
+            No memories yet — add facts in the Memory tab.
+          </p>
+        ) : (
+          memories.map((memory) => (
+            <div
+              key={memory.id}
+              className="flex items-start gap-2 text-sm text-white/50"
+            >
+              <span className="text-purple-400/50 mt-0.5">•</span>
+              <span>{memory.content}</span>
+            </div>
+          ))
+        )}
       </div>
     </GlassCard>
   );

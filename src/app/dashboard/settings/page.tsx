@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { GlassCard } from "@/components/ui/glass-card";
 import { Button } from "@/components/ui/button";
 import { conversationManager } from "@/lib/ai/conversation-manager";
+import { memoryClient } from "@/lib/memory/client";
 import type { HealthSummary, ProviderStatusDetail } from "@/lib/ai/types";
 import { Mic, Eye, Brain, Zap, Globe, Key, Check, ExternalLink, AlertTriangle, RefreshCw } from "lucide-react";
 
@@ -61,6 +62,16 @@ export default function SettingsPage() {
   const [keyError, setKeyError] = useState("");
   const [testingKey, setTestingKey] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
+  const [privacyMemoryEnabled, setPrivacyMemoryEnabled] = useState(true);
+
+  useEffect(() => {
+    memoryClient
+      .getPrivacy()
+      .then(({ privacy }) =>
+        setPrivacyMemoryEnabled(privacy.enabled && privacy.contextInjection)
+      )
+      .catch(() => {});
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -162,8 +173,9 @@ export default function SettingsPage() {
         title: "Memory",
         icon: Brain,
         items: [
-          { label: "Storage", value: "Local & Browser Memory" },
-          { label: "Retention", value: "Session + Local Storage" },
+          { label: "Storage", value: "Structured store (data/memory)" },
+          { label: "Profile", value: "Owner Profile tab" },
+          { label: "AI Context", value: privacyMemoryEnabled ? "Injected automatically" : "Disabled" },
         ],
       },
       {
@@ -181,7 +193,7 @@ export default function SettingsPage() {
       description?: string;
       items: Array<{ label: string; value: string; color?: string }>;
     }>;
-  }, [health, isGeminiConnected, isOllamaConnected, activeProviderLabel]);
+  }, [health, isGeminiConnected, isOllamaConnected, activeProviderLabel, privacyMemoryEnabled]);
 
   const providerErrors = useMemo(
     () =>
