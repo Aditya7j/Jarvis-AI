@@ -1,39 +1,63 @@
 "use client";
 
-import Image from "next/image";
+import { useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { memo } from "react";
 import { useVisionStore } from "@/stores/vision-store";
-import { visionService } from "@/lib/vision/vision-service";
+import { cameraService } from "@/lib/camera";
 import { Camera, Monitor, X, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const PreviewThumbnail = memo(function PreviewThumbnail() {
-  const lastCapturedFrame = useVisionStore((s) => s.lastCapturedFrame);
-  const webcamActive = useVisionStore((s) => s.webcamActive);
-  const screenShareActive = useVisionStore((s) => s.screenShareActive);
-  if (!lastCapturedFrame) return null;
+const LiveThumbnail = memo(function LiveThumbnail({
+  stream,
+  label,
+}: {
+  stream: MediaStream | null;
+  label: string;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (stream && video.srcObject !== stream) {
+      video.srcObject = stream;
+      void video.play().catch(() => {});
+    } else if (!stream && video.srcObject) {
+      video.srcObject = null;
+    }
+  }, [stream]);
+
+  if (!stream) return null;
+
   return (
-    <div
-      className={cn(
-        "relative w-20 h-14 rounded-xl overflow-hidden border border-white/10 bg-black",
-        !webcamActive && !screenShareActive && "hidden"
-      )}
-    >
-      <Image
-        src={lastCapturedFrame}
-        alt="Live vision preview"
-        fill
-        unoptimized
-        className="object-cover"
+    <div className="relative w-20 h-14 rounded-xl overflow-hidden border border-white/10 bg-black">
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className="w-full h-full object-cover"
       />
       <span className="absolute top-1 left-1 px-1 py-0.5 rounded bg-black/60 text-[8px] font-mono text-green-300/90">
-        LIVE
+        LIVE · {label}
       </span>
     </div>
   );
 });
-PreviewThumbnail.displayName = "PreviewThumbnail";
+LiveThumbnail.displayName = "LiveThumbnail";
+
+function PreviewThumbnail() {
+  const webcamActive = useVisionStore((s) => s.webcamActive);
+  const screenShareActive = useVisionStore((s) => s.screenShareActive);
+  const webcamStream = useVisionStore((s) => s.webcamStream);
+  const screenStream = useVisionStore((s) => s.screenStream);
+
+  const stream = screenShareActive ? screenStream : webcamActive ? webcamStream : null;
+  const label = screenShareActive ? "SCREEN" : "CAM";
+
+  return <LiveThumbnail stream={stream} label={label} />;
+}
 
 function SourceBadge({
   icon,
@@ -105,7 +129,7 @@ export function VisionStatusBar() {
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          className="flex items-center gap-2"
+          className={cn("flex items-center gap-2")}
         >
           <PreviewThumbnail />
           <div className="flex items-center gap-2">
@@ -113,14 +137,14 @@ export function VisionStatusBar() {
               icon={<Camera className="w-3.5 h-3.5 text-green-400" />}
               label="Camera"
               active={webcamActive}
-              onStop={() => visionService.stopWebcam()}
+              onStop={() => cameraService.stopWebcam()}
               stopLabel="Turn camera off"
             />
             <SourceBadge
               icon={<Monitor className="w-3.5 h-3.5 text-green-400" />}
               label="Screen"
               active={screenShareActive}
-              onStop={() => visionService.stopScreenShare()}
+              onStop={() => cameraService.stopScreenShare()}
               stopLabel="Stop screen sharing"
             />
           </div>
