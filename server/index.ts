@@ -5,7 +5,10 @@ import { conversationRoutes } from "./routes/conversation";
 import { visionRoutes } from "./routes/vision";
 import { sttRoutes } from "./routes/stt";
 import { ttsRoutes } from "./routes/tts";
+import { assistantRoutes } from "./routes/assistant";
 import { aiService, APP_VERSION } from "../src/lib/ai";
+import { initToolRouter } from "../src/services/tools";
+import { startTaskAutomation } from "../src/services/tasks";
 
 const server = Fastify({
   logger: {
@@ -17,10 +20,14 @@ const server = Fastify({
 });
 
 async function main() {
+  initToolRouter();
+  startTaskAutomation();
+
   await server.register(cors, { origin: true });
   await server.register(fastifyWebsocket);
 
   await server.register(conversationRoutes, { prefix: "/api/conversation" });
+  await server.register(assistantRoutes, { prefix: "/api/assistant" });
   await server.register(visionRoutes, { prefix: "/api/vision" });
   await server.register(sttRoutes, { prefix: "/api/stt" });
   await server.register(ttsRoutes, { prefix: "/api/tts" });
