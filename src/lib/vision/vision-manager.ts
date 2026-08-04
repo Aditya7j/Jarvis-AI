@@ -4,8 +4,9 @@ import {
   type VisionAnalysisSummary,
 } from "@/lib/ai/prompts";
 import type { VisionDepth } from "@/lib/ai/vision-intent";
-import { liveFrameKey, liveVisionEngine } from "./live-vision-engine";
+import { liveFrameKey, liveVisionEngine, LIVE_VISION_STALE_MS } from "./live-vision-engine";
 import { answerFromVisionCache } from "./vision-answer";
+import { visionCache, type CachedVisionResult } from "./vision-cache";
 import { getVisionStateStore } from "./vision-state";
 
 /**
@@ -235,4 +236,94 @@ export async function resolveVisualQuestion(
     cacheAgeMs: age,
     meta: { requestType, cacheHit, cacheAgeMs: age, gemmaInvoked: true },
   };
+}
+
+/**
+ * Gemma analysis cache — the single authority for reuse rules. The chat layer
+ * runs the analysis; this manager owns the freshness decisions (1s stale,
+ * 250 ms frame skew), the cache write and the stale-analysis cancellation so
+ * every vision path shares one set of rules.
+ */
+
+export const VISION_CACHE_STALE_MS = LIVE_VISION_STALE_MS;
+export const VISION_CACHE_FRAME_SKEW_MS = 250;
+
+export interface CachedVisionPlan {
+  systemContext: string;
+  summary: VisionAnalysisSummary;
+}
+
+let activeVisionController: AbortController | null = null;
+
+function cancelActiveVision(): void {
+  if (activeVisionController) {
+    activeVisionController.abort();
+    activeVisionController = null;
+  }
+}
+
+/**
+ * Aborts any previous request's Gemma inference and returns an AbortSignal
+ * for this one. `done()` unlinks the caller's abort signal and clears the
+ * module slot so a stale request cannot cancel a newer one.
+ */
+export function beginVisionAnalysis(signal?: AbortSignal): {
+  signal: AbortSignal;
+  done: () => void;
+} {
+  cancelActiveVision();
+  const controller = new AbortController();
+  activeVisionController = controller;
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  return {
+    signal: controller.signal,
+    done: () => {
+      signal?.removeEventListener("abort", onAbort);
+      if (activeVisionController === controller) {
+        activeVisionController = null;
+      }
+    },
+  };
+}
+
+/**
+ * The cached analysis may only be reused when the frame it was built from is
+ * still the current one. If the request carries a NEWER frame (capturedAt
+ * ahead of the cached frame by more than the skew window) the scene may have
+ * changed, so the cache is skipped and the new frame is re-analyzed. This is
+ * what prevents "fresh frame capture, stale answer".
+ */
+export function cachedVisionPlan(
+  source: VisionFrameInput["source"],
+  newest?: VisionFrameInput
+): CachedVisionPlan | null {
+  const cached = visionCache.get(source);
+  if (!cached) return null;
+  if (Date.now() - cached.capturedAt > VISION_CACHE_STALE_MS) {
+    log.info("Vision cache entry is stale (frame older than 1s); re-analyzing", {
+      ageMs: Date.now() - cached.capturedAt,
+    });
+    return null;
+  }
+  if (
+    newest?.capturedAt &&
+    newest.capturedAt - cached.capturedAt > VISION_CACHE_FRAME_SKEW_MS
+  ) {
+    log.info("Vision cache entry is from an older frame; re-analyzing", {
+      cachedAt: cached.capturedAt,
+      frameAt: newest.capturedAt,
+      skewMs: newest.capturedAt - cached.capturedAt,
+    });
+    return null;
+  }
+  log.info("Vision result reused from cache", {
+    ageMs: Date.now() - cached.analyzedAt,
+    summary: cached.summary,
+  });
+  return { systemContext: cached.systemContext, summary: cached.summary };
+}
+
+export function cacheVisionResult(result: CachedVisionResult): void {
+  visionCache.set(result);
 }

@@ -24,7 +24,7 @@ import { OllamaProvider } from "./providers/ollama";
 import { OpenAIProvider } from "./providers/openai";
 import type { AIProvider } from "./providers/types";
 import { describeRoles, roleModelName, type ModelRole } from "./router";
-import { executeTool } from "./tools";
+import { executeTool, initToolRouter } from "@/services/tools";
 import { APP_VERSION } from "./version";
 import type {
   AIMessageInput,
@@ -766,8 +766,12 @@ export class AIProviderService {
 
       const next: AIMessageInput[] = [...messages];
       next.push({ role: "assistant", content: content || "" });
+      initToolRouter();
       for (const call of toolCalls) {
-        const output = await executeTool(call.name, call.arguments);
+        const result = await executeTool(call.name, call.arguments);
+        const output = result.ok
+          ? JSON.stringify(result.data)
+          : JSON.stringify({ error: result.error.message });
         next.push({ role: "tool", content: output, name: call.name });
       }
       messages = next;

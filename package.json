@@ -8,13 +8,10 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "server": "tsx server/index.ts"
+    "test": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
-    "@fastify/cors": "^9.0.0",
-    "@fastify/websocket": "^10.0.0",
     "@fontsource-variable/inter": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@google/generative-ai": "^0.24.1",
@@ -22,20 +19,17 @@
     "@react-three/fiber": "^8.17.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
-    "fastify": "^4.28.0",
     "framer-motion": "^11.3.0",
     "lucide-react": "^0.408.0",
     "next": "^14.2.5",
     "onnxruntime-node": "^1.27.0",
     "openai": "^4.55.0",
-    "pino-pretty": "^11.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "sharp": "^0.35.3",
     "tailwind-merge": "^2.4.0",
     "three": "^0.166.0",
     "typescript": "^5.5.3",
-    "ws": "^8.18.0",
     "zustand": "^4.5.0"
   },
   "devDependencies": {
@@ -50,7 +44,6 @@
     "postcss": "^8.4.39",
     "prettier": "^3.3.0",
     "tailwindcss": "^3.4.6",
-    "tsx": "^4.16.0",
     "vitest": "^2.1.9"
   }
 }

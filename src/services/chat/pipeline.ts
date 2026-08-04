@@ -13,13 +13,15 @@
 import { aiLogger } from "@/lib/ai/logger";
 import {
   BATTERY_DENIED_REPLY,
+  DEFAULT_SYSTEM_PROMPT,
   GEOLOCATION_DENIED_REPLY,
   WEATHER_FAILED_REPLY,
   WEATHER_NO_LOCATION_REPLY,
   buildVerifiedFactContext,
-} from "@/lib/ai/intent-router";
-import { buildNoCameraSystemContext } from "@/lib/ai/prompts";
-import { DEFAULT_SYSTEM_PROMPT } from "@/lib/ai/prompts";
+} from "@/lib/ai/prompts";
+import type { VisionAnalysisSummary } from "@/lib/ai/prompts";
+import { classifyVisionDepth } from "@/lib/ai/vision-intent";
+import type { VisionFrameInput } from "@/lib/vision/vision-manager";
 import { getWeather } from "@/lib/ai/system-tools";
 import type { AIMessageInput } from "@/lib/ai/types";
 import { parseConversionRequest } from "@/lib/toolkit/convert";
@@ -38,7 +40,8 @@ import {
 } from "@/services/planner/intents";
 import type { VerifiedFact } from "@/services/planner/types";
 import { CoTFilter } from "@/services/reasoning";
-import { executeTool, type ToolResult } from "@/services/tools";
+import { executeTool, initToolRouter, type ToolResult } from "@/services/tools";
+import { resolveVisionPlan } from "./vision";
 
 const log = aiLogger.child("pipeline");
 
@@ -46,7 +49,14 @@ export interface PipelineModel {
   streamText: (opts: {
     messages: AIMessageInput[];
     signal?: AbortSignal;
+    model?: string;
   }) => AsyncIterable<string>;
+  analyzeCameraFrame?: (opts: {
+    imageBase64: string;
+    prompt?: string;
+    mimeType?: string;
+    signal?: AbortSignal;
+  }) => Promise<string>;
 }
 
 export type PipelineEvent =
@@ -59,6 +69,7 @@ export type PipelineEvent =
       ok: boolean;
       fallbackReason?: string;
     }
+  | { kind: "vision"; summary: VisionAnalysisSummary }
   | { kind: "token"; text: string }
   | { kind: "fact"; tool: string; subject: string }
   | { kind: "done" };
@@ -71,6 +82,13 @@ export interface PipelineOptions {
     geolocation?: { granted: boolean; latitude?: number; longitude?: number; accuracyM?: number };
     battery?: { granted: boolean; level?: number; levelPercent?: number; charging?: boolean };
   };
+  /** Live vision state + the newest client frames for visual questions. */
+  vision?: {
+    state: "off" | "live" | "no-frame";
+    frames: VisionFrameInput[];
+  };
+  /** Optional explicit reasoning-model override. */
+  model?: string;
   /** Include a compact awareness snapshot in the system context. */
   includeAwareness?: boolean;
   /** Query long-term memory for relevant context. Defaults true. */
@@ -144,6 +162,25 @@ function injectVerifiedFacts(
   }
   return [
     { role: "system", content: `${DEFAULT_SYSTEM_PROMPT}\n\n${blocks.join("\n\n")}` },
+    ...messages,
+  ];
+}
+
+function injectSystemBlock(
+  messages: AIMessageInput[],
+  systemContext: string
+): AIMessageInput[] {
+  const index = messages.findIndex((m) => m.role === "system");
+  if (index >= 0) {
+    const copy = messages.slice();
+    copy[index] = {
+      ...copy[index],
+      content: `${copy[index].content}\n\n${systemContext}`,
+    };
+    return copy;
+  }
+  return [
+    { role: "system", content: `${DEFAULT_SYSTEM_PROMPT}\n\n${systemContext}` },
     ...messages,
   ];
 }
@@ -250,9 +287,10 @@ async function* streamThrough(
   model: PipelineModel,
   messages: AIMessageInput[],
   filter: CoTFilter,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  modelName?: string
 ): AsyncGenerator<PipelineEvent> {
-  for await (const token of model.streamText({ messages, signal })) {
+  for await (const token of model.streamText({ messages, signal, model: modelName })) {
     const clean = filter.push(token);
     if (clean) yield { kind: "token", text: clean };
   }
@@ -269,6 +307,10 @@ export async function* runPipeline(
   model: PipelineModel,
   options: PipelineOptions = {}
 ): AsyncGenerator<PipelineEvent> {
+  // Ensure the production Tool Router is registered wherever this pipeline runs
+  // (Next.js process, Fastify sidecar, tests). Idempotent — safe per request.
+  initToolRouter();
+
   if (!prompt.trim()) {
     yield { kind: "token", text: "I didn't catch what you asked." };
     yield { kind: "done" };
@@ -417,9 +459,33 @@ export async function* runPipeline(
       }
       case "vision":
       case "ocr": {
-        finalMessages = [{ role: "system", content: buildNoCameraSystemContext() }, ...messages];
+        const resolution = await resolveVisionPlan({
+          prompt: q,
+          depth: classifyVisionDepth(q),
+          visionState: options.vision?.state ?? "off",
+          frames: options.vision?.frames ?? [],
+          model,
+          signal,
+        });
+        if (resolution.kind === "direct") {
+          if (resolution.summary) yield { kind: "vision", summary: resolution.summary };
+          yield { kind: "status", phase: "cached" };
+          yield { kind: "token", text: resolution.text };
+          yield { kind: "done" };
+          return;
+        }
+        if (resolution.kind === "cancelled") {
+          yield { kind: "status", phase: "cancelled" };
+          yield { kind: "done" };
+          return;
+        }
+        const plan = resolution.plan;
+        if (plan.summary) yield { kind: "vision", summary: plan.summary };
         yield { kind: "status", phase: "answering" };
-        yield* streamThrough(model, finalMessages, filter, signal);
+        finalMessages = plan.systemContext
+          ? injectSystemBlock(messages, plan.systemContext)
+          : messages;
+        yield* streamThrough(model, finalMessages, filter, signal, options.model);
         yield { kind: "done" };
         return;
       }
@@ -474,7 +540,7 @@ export async function* runPipeline(
 
   log.info("[verified-facts]", { count: facts.length, intent });
   yield { kind: "status", phase: "answering" };
-  yield* streamThrough(model, finalMessages, filter, signal);
+  yield* streamThrough(model, finalMessages, filter, signal, options.model);
   yield { kind: "done" };
 }
 

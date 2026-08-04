@@ -5,7 +5,7 @@ import type { VisionAnalysisSummary } from "./prompts";
 import { visionService } from "@/lib/vision/vision-service";
 import { useVisionStore } from "@/stores/vision-store";
 import { classifyVisionDepth, classifyVisionIntent } from "./vision-intent";
-import { classifyToolIntent } from "./intent-router";
+import { classifyPlanIntent } from "@/services/planner";
 import { getSystemClock } from "./system-tools";
 import type {
   BatteryResult,
@@ -171,17 +171,17 @@ export class AIClient {
     const activeSource = visionService.getActiveSource();
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     const prompt = lastUser?.content ?? "";
-    const toolIntent = classifyToolIntent(prompt);
+    const planIntent = classifyPlanIntent(prompt);
     // Browser-only system tools run here, BEFORE the LLM, so their verified
     // output travels with the request and the server never has to guess.
     const toolsBody: NonNullable<typeof body.tools> = {};
-    if (toolIntent === "system-clock") {
+    if (planIntent === "system-clock") {
       toolsBody.systemClock = getSystemClock();
     }
-    if (toolIntent === "battery") {
+    if (planIntent === "battery") {
       toolsBody.battery = await getBatteryInfo();
     }
-    if (toolIntent === "geolocation" || toolIntent === "weather") {
+    if (planIntent === "geolocation" || planIntent === "weather") {
       toolsBody.geolocation = await requestGeolocation();
     }
     if (Object.keys(toolsBody).length > 0) {

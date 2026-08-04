@@ -17,28 +17,6 @@ export {
   VISION_KEYWORDS,
 } from "./router";
 export {
-  JARVIS_TOOLS,
-  executeTool,
-  registerTool,
-  hasTool,
-} from "./tools";
-export type { ToolExecutor } from "./tools";
-export {
-  classifyToolIntent,
-  toolLabelFor,
-  buildVerifiedFactContext,
-  detectOcr,
-  detectSystemClock,
-  detectGeolocation,
-  detectWeather,
-  detectBattery,
-  GEOLOCATION_DENIED_REPLY,
-  BATTERY_DENIED_REPLY,
-  WEATHER_NO_LOCATION_REPLY,
-  WEATHER_FAILED_REPLY,
-} from "./intent-router";
-export type { ToolIntent } from "./intent-router";
-export {
   getSystemClock,
   getWeather,
 } from "./system-tools";

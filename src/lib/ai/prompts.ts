@@ -22,6 +22,36 @@ Fact policy (STRICT):
 - When a verified fact is provided, present it naturally and concisely in your own words. Never claim you checked, measured, fetched, looked it up, or are "recalibrating" anything — just state the fact.
 - If you are asked for a system fact that was not provided, say you don't have access to that information and, where relevant, mention how it could be enabled.`;
 
+export const GEOLOCATION_DENIED_REPLY =
+  "I don't have access to your location. If you grant location permission, I can tell you where you are.";
+
+export const BATTERY_DENIED_REPLY =
+  "I don't have access to your device's battery information.";
+
+export const WEATHER_NO_LOCATION_REPLY =
+  "I don't have access to your location, so I can't check the weather. If you grant location permission, I can tell you the current conditions.";
+
+export const WEATHER_FAILED_REPLY =
+  "I couldn't fetch live weather data right now. Please try again in a moment.";
+
+/**
+ * The system block handed to the LLM alongside a verified tool output. The
+ * fact is the ONLY source of truth; the model presents it naturally and never
+ * claims to have measured, fetched or computed it.
+ */
+export function buildVerifiedFactContext(
+  toolLabel: string,
+  subject: string,
+  fact: unknown
+): string {
+  return `Verified data from the ${toolLabel} tool — this is the ONLY source of truth for ${subject}:
+${JSON.stringify(fact, null, 2)}
+STRICT:
+- ${subject[0].toUpperCase()}${subject.slice(1)} must come exclusively from the data above. Never guess, estimate, recall, infer or compute it yourself.
+- Present it naturally to the user in your own words. Never claim you checked, measured, fetched, looked it up, or are "recalibrating".
+- Do not invent values that are not in the data. If the data is missing something the user asked about, say you don't have access to that information.`;
+}
+
 export const VISION_CONTEXT_PROMPT = `You are the vision system for JARVIS, an AI assistant. Describe the current live view concisely (under 120 words). Note people, their appearance and mood, objects, text, and any screen content or app the user has open. Focus on what is most useful for answering the user's questions about what they see.`;
 
 export interface BoundingBox {

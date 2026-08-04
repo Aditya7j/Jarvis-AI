@@ -11,23 +11,21 @@
  * never gets to guess.
  */
 
-import {
-  detectBattery,
-  detectGeolocation,
-  detectOcr,
-  detectSystemClock,
-  detectWeather,
-} from "@/lib/ai/intent-router";
 import { classifyVisionIntent } from "@/lib/ai/vision-intent";
 import {
+  detectBattery,
   detectCalculator,
   detectCurrency,
+  detectGeolocation,
   detectMaps,
   detectMemory,
   detectNews,
+  detectOcr,
+  detectSystemClock,
   detectSystemStatus,
   detectTasks,
   detectUnitConversion,
+  detectWeather,
   detectWebSearch,
   type PlanIntent,
 } from "./intents";

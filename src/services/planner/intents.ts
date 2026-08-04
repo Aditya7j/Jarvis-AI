@@ -161,3 +161,101 @@ export function detectTaskAction(text: string): boolean {
 export function detectTasks(text: string): boolean {
   return detectTaskCreate(text) || detectTaskList(text) || detectTaskAction(text);
 }
+
+/**
+ * System-tool detectors — folded in from the legacy intent router. They gate
+ * the four client-gated facts (system clock, geolocation, weather, battery)
+ * plus OCR, all still resolved deterministically before any model call.
+ */
+
+const OCR_PATTERNS: RegExp[] = [
+  /\bocr\b/i,
+  /\bread\s+(?:the\s+)?(?:text|screen|page|sign|label|letter|word|writing|note|document|card|poster|whiteboard)\b/i,
+  /\bwhat\s+does\s+the\s+(?:text|screen|page|sign|label|paper|note|card|poster)\s+say\b/i,
+  /\bwhat\s+does\s+it\s+say\b/i,
+  /\bwhat'?s\s+(?:it\s+|this\s+|that\s+)?say(?:ing)?\b/i,
+  /\btext\s+on\s+(?:this|that|the|my)\b/i,
+  /\bwhat\s+is\s+written\b/i,
+];
+
+const CLOCK_PATTERNS: RegExp[] = [
+  /\bwhat(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+)?time\b/i,
+  /\bwhat\s+time\s+is\s+it\b/i,
+  /\bcurrent\s+time\b/i,
+  /\btime\s+now\b/i,
+  /\bwhat(?:'s|\s+is)\s+(?:the\s+|today'?s\s+)?date\b/i,
+  /\bwhat\s+date\s+is\s+it\b/i,
+  /\btoday'?s\s+date\b/i,
+  /\bcurrent\s+date\b/i,
+  /\bwhat\s+day\s+is\s+(?:it|today)\b/i,
+  /\bwhat\s+day\s+of\s+the\s+week\s+is\s+it\b/i,
+  /\btime\s+zone\b/i,
+  /\btimezone\b/i,
+];
+
+const GEOLOCATION_PATTERNS: RegExp[] = [
+  /\bwhere\s+am\s+i\b/i,
+  /\bwhere\s+are\s+(?:we|you)\b/i,
+  /\bwhere\s+am\s+i\s+located\b/i,
+  /\bwhere\s+is\s+my\s+location\b/i,
+  /\bmy\s+location\b/i,
+  /\bcurrent\s+location\b/i,
+  /\bwhat\s+(?:city|town|state|region|country|area)\s+(?:am\s+i|are\s+we)\s+in\b/i,
+  /\bwhich\s+(?:city|town|state|region|country)\s+(?:am\s+i|are\s+we)\s+in\b/i,
+  /\bwhat\s+(?:city|state|country)\s+is\s+this\b/i,
+  /\bgeolocat/i,
+  /\blocate\s+me\b/i,
+];
+
+const WEATHER_PATTERNS: RegExp[] = [
+  /\bweather\b/i,
+  /\bforecast\b/i,
+  /\bwhat(?:'s|\s+is)\s+the\s+(?:current\s+)?temperature\b/i,
+  /\btemperatures?\s+(?:outside|today|right\s+now|out\s+there|there)\b/i,
+  /\b(?:is\s+it|will\s+it|does\s+it)\s+rain(?:ing)?\b/i,
+  /\braining\b/i,
+  /\bsunny\b/i,
+  /\bcloudy\b/i,
+  /\bovercast\b/i,
+  /\bhumidit/i,
+  /\bwind(?:y|speed)\b/i,
+  /\bclimate\b/i,
+];
+
+const BATTERY_PATTERNS: RegExp[] = [
+  /\bbattery\b/i,
+  /\bbattery\s+(?:level|life|percentage|charge)\b/i,
+  /\bpower\s+level\b/i,
+  /\bhow\s+much\s+(?:battery|power|charge)\s+(?:do\s+(?:i|we)\s+have|is\s+left|is\s+remaining|left)\b/i,
+  /\b(?:battery|charge)\s+left\b/i,
+  /\bcharging\s+status\b/i,
+];
+
+function matchesAny(text: string, patterns: RegExp[]): boolean {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+export function detectOcr(text: string): boolean {
+  if (!text) return false;
+  return matchesAny(text, OCR_PATTERNS);
+}
+
+export function detectSystemClock(text: string): boolean {
+  if (!text) return false;
+  return matchesAny(text, CLOCK_PATTERNS);
+}
+
+export function detectGeolocation(text: string): boolean {
+  if (!text) return false;
+  return matchesAny(text, GEOLOCATION_PATTERNS);
+}
+
+export function detectWeather(text: string): boolean {
+  if (!text) return false;
+  return matchesAny(text, WEATHER_PATTERNS);
+}
+
+export function detectBattery(text: string): boolean {
+  if (!text) return false;
+  return matchesAny(text, BATTERY_PATTERNS);
+}

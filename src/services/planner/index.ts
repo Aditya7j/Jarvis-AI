@@ -12,19 +12,24 @@ export {
 } from "./planner";
 export type { PlanIntent } from "./planner";
 export {
+  detectBattery,
   detectCalculator,
   detectCurrency,
+  detectGeolocation,
   detectMaps,
   detectMemory,
   detectMemoryRecall,
   detectMemoryStore,
   detectNews,
+  detectOcr,
+  detectSystemClock,
   detectSystemStatus,
   detectTaskAction,
   detectTaskCreate,
   detectTaskList,
   detectTasks,
   detectUnitConversion,
+  detectWeather,
   detectWebSearch,
 } from "./intents";
 export { DIRECT_TOOL_INTENTS } from "./types";
