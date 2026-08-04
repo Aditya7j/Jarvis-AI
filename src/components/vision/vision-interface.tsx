@@ -6,13 +6,16 @@ import { Button } from "@/components/ui/button";
 import { useVisionStore } from "@/stores/vision-store";
 import { cameraService } from "@/lib/camera";
 import type { CameraSource } from "@/lib/camera";
-import { Camera, Monitor, StopCircle, AlertTriangle, Video } from "lucide-react";
+import { liveVisionSession } from "@/lib/vision/live-vision-session";
+import { VisionDebugOverlay } from "./vision-debug-overlay";
+import { Camera, Monitor, StopCircle, AlertTriangle, Video, Gauge } from "lucide-react";
 
 export function VisionInterface() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const miniVideoRef = useRef<HTMLVideoElement>(null);
   const statsRef = useRef<HTMLSpanElement>(null);
   const metaRef = useRef<HTMLSpanElement>(null);
+  const analysisRef = useRef<HTMLSpanElement>(null);
 
   const webcamActive = useVisionStore((s) => s.webcamActive);
   const screenShareActive = useVisionStore((s) => s.screenShareActive);
@@ -20,6 +23,9 @@ export function VisionInterface() {
   const screenStream = useVisionStore((s) => s.screenStream);
   const visionError = useVisionStore((s) => s.visionError);
   const setVisionError = useVisionStore((s) => s.setVisionError);
+  const lastAnalysis = useVisionStore((s) => s.lastAnalysis);
+  const debugOverlayOpen = useVisionStore((s) => s.debugOverlayOpen);
+  const setDebugOverlayOpen = useVisionStore((s) => s.setDebugOverlayOpen);
 
   const activeMode: CameraSource | null = screenShareActive
     ? "screen"
@@ -27,6 +33,14 @@ export function VisionInterface() {
       ? "webcam"
       : null;
   const activeStream = screenShareActive ? screenStream : webcamStream;
+
+  useEffect(() => {
+    if (activeMode) {
+      liveVisionSession.start();
+    } else {
+      liveVisionSession.stop();
+    }
+  }, [activeMode]);
 
   useEffect(() => {
     for (const ref of [videoRef, miniVideoRef]) {
@@ -53,10 +67,43 @@ export function VisionInterface() {
           ? `Frame ${frame.width}×${frame.height} · ${new Date(frame.capturedAt).toLocaleTimeString()}`
           : "Waiting for first frame...";
       }
+      if (analysisRef.current) {
+        const state = useVisionStore.getState();
+        const live = state.latestLiveResult;
+        if (state.liveAnalyzing) {
+          analysisRef.current.textContent = "Analyzing live frame…";
+        } else if (live && live.summary && live.summary.state === "live") {
+          const extra =
+            live.newObjects.length > 0
+              ? ` · new: ${live.newObjects.join(", ")}`
+              : "";
+          analysisRef.current.textContent = `Live analyzed ${new Date(
+            live.summary.capturedAt ?? Date.now()
+          ).toLocaleTimeString()} · conf ${live.summary.confidence ?? "?"}% · ${
+            live.summary.objectCount
+          } object(s)${extra}`;
+        } else if (live?.error) {
+          analysisRef.current.textContent = "Vision error — check server logs";
+        } else {
+          const analysis = state.lastAnalysis;
+          if (analysis?.state === "error") {
+            analysisRef.current.textContent = "Vision error — check server logs";
+          } else if (analysis && analysis.state === "live" && analysis.capturedAt) {
+            analysisRef.current.textContent = `Analyzed ${new Date(
+              analysis.capturedAt
+            ).toLocaleTimeString()} · conf ${analysis.confidence ?? "?"}% · ${
+              analysis.objectCount
+            } object(s)`;
+          } else {
+            analysisRef.current.textContent =
+              "Waiting for first live analysis…";
+          }
+        }
+      }
     };
     render();
     return cameraService.subscribeFrames(render);
-  }, [activeMode]);
+  }, [activeMode, lastAnalysis]);
 
   const handleCapture = useCallback(() => {
     void cameraService.captureFrame().then((frame) => {
@@ -89,6 +136,17 @@ export function VisionInterface() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {activeMode && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setDebugOverlayOpen(!debugOverlayOpen)}
+              className={debugOverlayOpen ? "bg-cyan-500/10 text-cyan-300" : ""}
+            >
+              <Gauge className="w-3.5 h-3.5 mr-1" />
+              Debug
+            </Button>
+          )}
           {activeMode ? (
             <Button variant="ghost" size="sm" onClick={() => cameraService.stopAll()}>
               <StopCircle className="w-4 h-4 text-red-400 mr-1" />
@@ -131,6 +189,7 @@ export function VisionInterface() {
               muted
               className="w-full h-full object-contain"
             />
+            <VisionDebugOverlay />
             <button
               onClick={handleCapture}
               className="absolute bottom-4 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-xl border border-white/10 text-xs text-white/60 hover:text-white/80 hover:bg-white/20 transition-all"
@@ -158,6 +217,7 @@ export function VisionInterface() {
             </span>
             <span ref={statsRef} className="text-[10px] text-white/25 font-mono truncate" />
             <span ref={metaRef} className="text-[10px] text-white/25 font-mono truncate" />
+            <span ref={analysisRef} className="text-[10px] text-cyan-400/50 font-mono truncate" />
           </div>
         </div>
       )}

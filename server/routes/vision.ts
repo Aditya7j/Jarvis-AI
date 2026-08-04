@@ -19,7 +19,7 @@ export const visionRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
-      const description = await aiService.generateVision({
+      const description = await aiService.analyzeCameraFrame({
         imageBase64: image,
         prompt,
       });
@@ -40,14 +40,11 @@ export const visionRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
-      const text = await aiService.generateVision(
-        {
-          imageBase64: image,
-          prompt:
-            "Extract all text from this image. Return only the extracted text, preserving layout order.",
-        },
-        { includeMemory: false }
-      );
+      const text = await aiService.analyzeCameraFrame({
+        imageBase64: image,
+        prompt:
+          "Extract all text from this image. Return only the extracted text, preserving layout order.",
+      });
       return {
         text,
         timestamp: Date.now(),

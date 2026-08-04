@@ -4,7 +4,23 @@ Goal: apply **YAGNI** (remove what isn't used / isn't needed yet) and **DRY** (e
 
 Verification before/after: `npx tsc --noEmit` and `npm run build` both exit `0`, and the Fastify server boots on port 3001.
 
----
+---Gemma 3 is now installed locally.
+
+Verify the complete vision pipeline end-to-end.
+
+Requirements:
+- Confirm every camera question captures the latest frame.
+- Send the captured image to gemma3:12b using Ollama's image API (images field).
+- Verify Gemma 3 actually receives the image and returns a response.
+- Log every step:
+  ✓ Camera frame captured
+  ✓ Image encoded
+  ✓ Request sent to gemma3:12b
+  ✓ Vision response received
+  ✓ Structured JSON created
+  ✓ JSON passed to Qwen3
+- If any step fails, log the exact failure instead of falling back to "I can't determine that."
+- Do not break existing voice, memory, or chat features.
 
 ## YAGNI — Removed dead code and dead dependencies
 

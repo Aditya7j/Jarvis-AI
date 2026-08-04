@@ -1,10 +1,13 @@
+import type { RouterCapabilities } from "./router";
+
 export type ProviderName = "gemini" | "openai" | "anthropic" | "ollama";
 
-export type ChatRole = "system" | "user" | "assistant";
+export type ChatRole = "system" | "user" | "assistant" | "tool";
 
 export interface AIMessageInput {
   role: ChatRole;
   content: string;
+  name?: string;
 }
 
 export interface ToolCall {
@@ -13,12 +16,23 @@ export interface ToolCall {
   parameters?: Record<string, unknown>;
 }
 
+export interface ToolCallInvocation {
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface ToolCallResponse {
+  content: string;
+  toolCalls: ToolCallInvocation[];
+}
+
 export interface GenerateTextOptions {
   messages: AIMessageInput[];
   model?: string;
   temperature?: number;
   maxTokens?: number;
   tools?: ToolCall[];
+  maxToolIterations?: number;
   signal?: AbortSignal;
 }
 
@@ -26,6 +40,8 @@ export interface VisionRequest {
   imageBase64: string;
   mimeType?: string;
   prompt?: string;
+  model?: string;
+  signal?: AbortSignal;
 }
 
 export interface VisionImage {
@@ -57,6 +73,7 @@ export interface ProviderStatusDetail {
   error: string | null;
   latencyMs: number | null;
   vision: boolean;
+  visionModel?: string | null;
 }
 
 export interface HealthSummary {
@@ -67,6 +84,7 @@ export interface HealthSummary {
   openai: ProviderStatusDetail;
   anthropic: ProviderStatusDetail;
   ollama: ProviderStatusDetail;
+  capabilities: RouterCapabilities;
   version: string;
   timestamp: number;
 }

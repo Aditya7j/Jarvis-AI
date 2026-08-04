@@ -4,6 +4,7 @@ import fastifyWebsocket from "@fastify/websocket";
 import { conversationRoutes } from "./routes/conversation";
 import { visionRoutes } from "./routes/vision";
 import { sttRoutes } from "./routes/stt";
+import { ttsRoutes } from "./routes/tts";
 import { aiService, APP_VERSION } from "../src/lib/ai";
 
 const server = Fastify({
@@ -22,6 +23,7 @@ async function main() {
   await server.register(conversationRoutes, { prefix: "/api/conversation" });
   await server.register(visionRoutes, { prefix: "/api/vision" });
   await server.register(sttRoutes, { prefix: "/api/stt" });
+  await server.register(ttsRoutes, { prefix: "/api/tts" });
 
   server.get("/health", async () => {
     const health = await aiService.healthCheck();

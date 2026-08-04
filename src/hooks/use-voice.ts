@@ -3,10 +3,7 @@
 import { useEffect, useRef, useCallback } from "react";
 import { useVoiceStore } from "@/stores/voice-store";
 import { useConversationStore } from "@/stores/conversation-store";
-import {
-  isSpeechRecognitionSupported,
-  transcribeViaDeepgram,
-} from "@/lib/stt";
+import {isSpeechRecognitionSupported,transcribeViaServer} from "@/lib/stt";
 import { tts, isTtsSupported } from "@/lib/tts";
 import { triggerInterrupt } from "@/lib/interrupt";
 
@@ -58,6 +55,22 @@ function isInterruptPhrase(text: string): boolean {
   return INTERRUPT_PHRASES.includes(text) || INTERRUPT_PHRASES.includes(cleaned);
 }
 
+function normalizeForEcho(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s']/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isEcho(transcript: string, spokenText: string): boolean {
+  if (!spokenText) return false;
+  const t = normalizeForEcho(transcript);
+  if (t.length < 4) return false;
+  const s = normalizeForEcho(spokenText);
+  return s.length > 0 && s.includes(t);
+}
+
 function micErrorMessage(code: string): string {
   switch (code) {
     case "not-allowed":
@@ -94,6 +107,7 @@ export function useVoice() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | null>(null);
+  const lastSpokenRef = useRef("");
 
   const startSession = useCallback(() => {
     if (!isRunning.current) return;
@@ -164,21 +178,26 @@ export function useVoice() {
           } else {
             const command = result.trim();
             if (command) {
+              const speaking = tts.isSpeaking;
+              if (speaking && isEcho(command, lastSpokenRef.current)) {
+                console.info(`[STT] Ignoring echo while speaking: "${command}"`);
+                setInterimTranscript("");
+                continue;
+              }
+              if (speaking) {
+                console.info(
+                  `[STT] New command while speaking — interrupting: "${command}"`
+                );
+                triggerInterrupt();
+              }
               console.info(`[STT] Final transcript: "${command}"`);
               setTranscript(command);
               setTranscription(command);
             }
             setInterimTranscript("");
             if (useVoiceStore.getState().continuousMode) {
-              pausedRef.current = true;
-              setState("idle");
-              console.info(
-                "[STT] Continuous mode — ending utterance, pausing for this turn"
-              );
-              try {
-                recognition.stop();
-              } catch {
-                // session may already be closing
+              if (recognitionActiveRef.current) {
+                setState("listening");
               }
             }
           }
@@ -289,7 +308,7 @@ export function useVoice() {
     [setState]
   );
 
-  const stopDeepgramRecording = useCallback(
+  const stopServerRecording = useCallback(
     async (transcribe: boolean): Promise<void> => {
       const recorder = mediaRecorderRef.current;
       const stream = mediaStreamRef.current;
@@ -346,10 +365,10 @@ export function useVoice() {
       }
 
       try {
-        const text = await transcribeViaDeepgram(blob, mimeType);
+        const text = await transcribeViaServer(blob, mimeType);
         const trimmed = text.trim();
         if (trimmed) {
-          console.info(`[STT] Deepgram transcript: "${trimmed}"`);
+          console.info(`[STT] Server transcript: "${trimmed}"`);
           setTranscript(trimmed);
           setTranscription(trimmed);
         } else {
@@ -362,7 +381,7 @@ export function useVoice() {
         const message =
           error instanceof Error
             ? error.message
-            : "Speech-to-text failed. Set DEEPGRAM_API_KEY in .env or use Chrome/Edge.";
+            : "Speech-to-text failed. Install Whisper locally or use Chrome/Edge.";
         setMicError({ code: "transcription-failed", message });
       }
     },
@@ -392,7 +411,7 @@ export function useVoice() {
     }
 
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-      await stopDeepgramRecording(true);
+      await stopServerRecording(true);
       return;
     }
 
@@ -422,7 +441,7 @@ export function useVoice() {
           message: "Microphone recording failed. Try again.",
         });
         setState("idle");
-        void stopDeepgramRecording(false);
+        void stopServerRecording(false);
       };
       mediaRecorderRef.current = recorder;
       recorder.start();
@@ -430,7 +449,7 @@ export function useVoice() {
       setState("listening");
       setMicActive(true);
       timerRef.current = window.setTimeout(() => {
-        void stopDeepgramRecording(true);
+        void stopServerRecording(true);
       }, DEEPGRAM_MAX_RECORDING_MS);
     } catch (error) {
       const name = (error as { name?: string })?.name;
@@ -453,14 +472,14 @@ export function useVoice() {
         });
       }
     }
-  }, [setMicError, setState, setMicActive, stopDeepgramRecording, setInterimTranscript]);
+  }, [setMicError, setState, setMicActive, stopServerRecording, setInterimTranscript]);
 
   const stopListening = useCallback(() => {
     if (useVoiceStore.getState().continuousMode) {
       useVoiceStore.getState().setContinuousMode(false);
     }
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-      void stopDeepgramRecording(true);
+      void stopServerRecording(true);
       setState("idle");
       return;
     }
@@ -470,7 +489,7 @@ export function useVoice() {
     setTranscript("");
     setInterimTranscript("");
     setMicActive(false);
-  }, [setState, setTranscript, setInterimTranscript, setMicActive, stopDeepgramRecording]);
+  }, [setState, setTranscript, setInterimTranscript, setMicActive, stopServerRecording]);
 
   const startWakeWordDetection = useCallback(() => {
     if (isRunning.current) return;
@@ -498,9 +517,9 @@ export function useVoice() {
       }
       activeSessionRef.current = null;
       tts.stop();
-      void stopDeepgramRecording(false);
+      void stopServerRecording(false);
     };
-  }, [startWakeWordDetection, stopDeepgramRecording]);
+  }, [startWakeWordDetection, stopServerRecording]);
 
   useEffect(() => {
     return tts.subscribe((speaking) => {
@@ -534,6 +553,7 @@ export function useVoice() {
   }, [state, setMicActive, setRecordingMs]);
 
   const speak = useCallback((text: string) => {
+    lastSpokenRef.current = text;
     if (!isTtsSupported()) {
       console.warn("[TTS] Speech synthesis not supported");
       if (useVoiceStore.getState().continuousMode) {

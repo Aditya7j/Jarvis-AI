@@ -1,6 +1,11 @@
 import type { AIMessage } from "@/types";
 import type { HealthSummary, ProviderName } from "./types";
-import { getVisionContext } from "@/lib/vision/vision-context";
+import type { RouterCapabilities } from "./router";
+import type { VisionAnalysisSummary } from "./prompts";
+import type { VisionFrame } from "@/lib/vision/vision-service";
+import { visionService } from "@/lib/vision/vision-service";
+import { useVisionStore } from "@/stores/vision-store";
+import { classifyVisionDepth, classifyVisionIntent } from "./vision-intent";
 
 type ErrorPayload = {
   code?: string;
@@ -12,6 +17,8 @@ interface SSEFrame {
   token?: string;
   done?: boolean;
   error?: ErrorPayload;
+  vision?: VisionAnalysisSummary;
+  visionState?: { phase?: string };
 }
 
 function parseSSEFrame(frame: string): SSEFrame | null {
@@ -24,9 +31,17 @@ function parseSSEFrame(frame: string): SSEFrame | null {
   if (dataLines.length === 0) return null;
   const raw = dataLines.join("\n");
   try {
-    const parsed = JSON.parse(raw) as SSEFrame;
-    if (event === "error" && parsed.error) return parsed;
-    return parsed;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (event === "error" && parsed.error) return parsed as SSEFrame;
+    if (event === "vision" && parsed.vision) return parsed as SSEFrame;
+    if (event === "vision_state") {
+      return {
+        visionState: {
+          phase: typeof parsed.phase === "string" ? parsed.phase : "",
+        },
+      };
+    }
+    return parsed as SSEFrame;
   } catch {
     return null;
   }
@@ -58,6 +73,18 @@ export class AIClient {
 
   get provider(): ProviderName | "none" {
     return this.health?.provider ?? "none";
+  }
+
+  get capabilities(): RouterCapabilities | null {
+    return this.health?.capabilities ?? null;
+  }
+
+  get reasoningModel(): string | null {
+    return this.capabilities?.reasoning?.model ?? null;
+  }
+
+  get visionModel(): string | null {
+    return this.capabilities?.vision?.model ?? null;
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -106,32 +133,98 @@ export class AIClient {
   async generateResponse(
     messages: AIMessage[],
     onToken?: (token: string) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onStatus?: (phase: string) => void
   ): Promise<string> {
     const body: {
       messages: Array<{ role: string; content: string }>;
       stream: boolean;
-      vision?: {
+      vision: {
+        state: "off" | "live" | "no-frame";
         frames: Array<{
           image: string;
           mimeType: string;
           source?: "webcam" | "screen";
+          width?: number;
+          height?: number;
+          capturedAt?: number;
         }>;
       };
     } = {
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
       stream: true,
+      vision: { state: "off", frames: [] },
     };
 
-    const visionContext = getVisionContext();
-    if (visionContext && visionContext.frames.length > 0) {
-      body.vision = {
-        frames: visionContext.frames.map((frame) => ({
-          image: frame.data,
-          mimeType: frame.mimeType || "image/jpeg",
-          source: frame.source,
-        })),
-      };
+    const activeSource = visionService.getActiveSource();
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    const prompt = lastUser?.content ?? "";
+    const needsVision = classifyVisionIntent(prompt);
+    const visionDepth = needsVision ? classifyVisionDepth(prompt) : null;
+    if (needsVision && activeSource && visionDepth === "simple") {
+      // Simple questions are answered from the continuously-refreshed YOLO
+      // cache on the server — no blocking capture, no Gemma, <700ms total.
+      body.vision = { state: "live", frames: [] };
+      const live = visionService.getLiveResult(activeSource);
+      console.info(
+        `✓ Simple vision question → live YOLO cache (${
+          live ? `${live.objects.length} object(s)` : "no analysis yet"
+        })`
+      );
+    } else if (needsVision && activeSource && visionService.isLiveResultFresh(activeSource)) {
+      body.vision = { state: "live", frames: [] };
+      const live = visionService.getLiveResult(activeSource);
+      console.info(
+        `✓ Answered from live vision result (no new capture — conf ${live?.summary?.confidence ?? "-"}%, ${live?.objects?.length ?? 0} object(s), ${live?.newObjects?.length ?? 0} new)`
+      );
+    } else if (needsVision && activeSource) {
+      const fresh = await visionService.captureAnalysisFrame(activeSource);
+      const recent = visionService.getRecentFrames(activeSource, 3);
+      const seen = new Set<number>();
+      const frames: VisionFrame[] = [];
+      if (fresh) {
+        frames.push(fresh);
+        seen.add(fresh.capturedAt);
+      }
+      for (const frame of recent) {
+        if (frames.length >= 3) break;
+        if (!seen.has(frame.capturedAt)) {
+          frames.push(frame);
+          seen.add(frame.capturedAt);
+        }
+      }
+      if (frames.length > 0) {
+        body.vision = {
+          state: "live",
+          frames: frames.map((frame) => ({
+            image: frame.dataUrl,
+            mimeType: frame.mimeType || "image/jpeg",
+            source: frame.source,
+            width: frame.width,
+            height: frame.height,
+            capturedAt: frame.capturedAt,
+          })),
+        };
+        const totalBytes = frames.reduce(
+          (sum, frame) => sum + Math.round(frame.dataUrl.length * 0.75),
+          0
+        );
+        console.info(
+          `✓ Camera frame captured (${frames.length} frame(s), ${frames[0].width}x${frames[0].height}, newest at ${new Date(
+            frames[0].capturedAt
+          ).toLocaleTimeString()})`
+        );
+        console.info(
+          `✓ Image encoded (${frames.length} frame(s), ${totalBytes} bytes total, JPEG base64)`
+        );
+      } else {
+        body.vision = { state: "no-frame", frames: [] };
+        console.warn(
+          "⚠ Camera is ON but no frame could be captured for this request"
+        );
+      }
+    } else if (activeSource && !needsVision) {
+      console.info("Vision skipped — prompt is text-only");
     }
 
     const res = await fetch("/api/chat", {
@@ -178,6 +271,17 @@ export class AIClient {
           if (!parsed) continue;
           if (parsed.error) {
             throw new Error(parsed.error.message ?? "AI request failed");
+          }
+          if (parsed.vision) {
+            useVisionStore.getState().setLastAnalysis(parsed.vision);
+            console.info(
+              `✓ Vision JSON received: ${parsed.vision.confidence ?? "-"}% confidence, ${parsed.vision.objectCount} object(s)`
+            );
+            continue;
+          }
+          if (parsed.visionState) {
+            onStatus?.(parsed.visionState.phase ?? "");
+            continue;
           }
           if (parsed.done) return full;
           if (parsed.token) {

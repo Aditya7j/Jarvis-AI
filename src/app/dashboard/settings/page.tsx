@@ -113,12 +113,14 @@ export default function SettingsPage() {
     setTestingConnection(false);
   }, []);
 
-  const isGeminiConnected = health?.gemini.status === "connected";
-  const isOllamaConnected = health?.ollama.status === "connected";
+  const caps = health?.capabilities ?? null;
   const activeProviderLabel =
     health?.provider && health.provider !== "none"
       ? PROVIDER_BY_KEY.get(health.provider)?.label ?? "None"
       : "None";
+  const activeModelLabel = caps?.reasoning.model
+    ? `${activeProviderLabel} (${caps.reasoning.model})`
+    : activeProviderLabel;
 
   const sections = useMemo(() => {
     const providerItems = PROVIDER_ROWS.map((row) => {
@@ -133,12 +135,12 @@ export default function SettingsPage() {
       {
         title: "AI Providers",
         icon: Globe,
-        description: "Gemini (cloud, free tier), Ollama (local, no rate limits), OpenAI and Anthropic (paid).",
+        description: "Qwen3 (local reasoning) → Gemma 3 (local vision) → Gemini/OpenAI/Anthropic fallback.",
         items: [
           ...providerItems,
           {
             label: "Active Provider",
-            value: activeProviderLabel,
+            value: activeModelLabel,
             color: health?.status === "offline" || !health ? "text-white/30" : "text-green-400",
           },
         ],
@@ -148,8 +150,22 @@ export default function SettingsPage() {
         icon: Mic,
         items: [
           { label: "Wake Word", value: '"Hey Jarvis"' },
-          { label: "Speech Recognition", value: "Browser API (Free)" },
-          { label: "Speech Synthesis", value: "Browser API (Free)" },
+          {
+            label: "Speech Recognition",
+            value:
+              caps?.stt.engine === "whisper"
+                ? "Whisper (Local)"
+                : caps?.stt.engine === "deepgram"
+                ? "Deepgram (Cloud)"
+                : "Browser API (Free)",
+          },
+          {
+            label: "Speech Synthesis",
+            value:
+              caps?.tts.engine === "piper"
+                ? "Piper (Local)"
+                : "Browser API (Free)",
+          },
         ],
       },
       {
@@ -160,12 +176,18 @@ export default function SettingsPage() {
           { label: "Screen Share", value: "Browser Screen Capture API" },
           {
             label: "AI Vision",
-            value: isGeminiConnected
-              ? "Gemini Vision"
-              : isOllamaConnected
-              ? "Ollama (vision if available)"
-              : "Unavailable",
-            color: isGeminiConnected || isOllamaConnected ? "text-green-400" : "text-white/30",
+            value:
+              caps?.vision.provider === "ollama"
+                ? `Gemma 3 (${caps.vision.model ?? "auto"})`
+                : caps?.vision.provider === "gemini"
+                ? "Gemini Vision"
+                : caps?.vision.provider
+                ? "Cloud Vision"
+                : "Unavailable",
+            color:
+              caps?.vision.provider
+                ? "text-green-400"
+                : "text-white/30",
           },
         ],
       },
@@ -193,7 +215,7 @@ export default function SettingsPage() {
       description?: string;
       items: Array<{ label: string; value: string; color?: string }>;
     }>;
-  }, [health, isGeminiConnected, isOllamaConnected, activeProviderLabel, privacyMemoryEnabled]);
+  }, [health, caps, activeModelLabel, privacyMemoryEnabled]);
 
   const providerErrors = useMemo(
     () =>

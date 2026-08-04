@@ -1,4 +1,12 @@
 import type { CameraSource } from "./types";
+import { applyEnhancements } from "./enhance";
+
+interface CropRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 interface EncodeRequest {
   type: "encode";
@@ -7,6 +15,8 @@ interface EncodeRequest {
   width: number;
   height: number;
   quality: number;
+  crop?: CropRegion | null;
+  encodeId: number;
 }
 
 interface WorkerOutMessage {
@@ -15,6 +25,8 @@ interface WorkerOutMessage {
   bytes: ArrayBuffer;
   width: number;
   height: number;
+  encodeId: number;
+  encodeMs: number;
 }
 
 interface WorkerSelf {
@@ -63,12 +75,30 @@ async function process(request: EncodeRequest): Promise<void> {
       frame.close();
       return;
     }
-    ctx.drawImage(frame as unknown as CanvasImageSource, 0, 0, request.width, request.height);
+    const encodeStart = performance.now();
+    const crop = request.crop;
+    if (crop) {
+      ctx.drawImage(
+        frame as unknown as CanvasImageSource,
+        crop.x,
+        crop.y,
+        crop.width,
+        crop.height,
+        0,
+        0,
+        request.width,
+        request.height
+      );
+    } else {
+      ctx.drawImage(frame as unknown as CanvasImageSource, 0, 0, request.width, request.height);
+    }
+    applyEnhancements(ctx, request.width, request.height);
     const blob = await canvas!.convertToBlob({
       type: "image/jpeg",
       quality: request.quality,
     });
     const bytes = await blob.arrayBuffer();
+    const encodeMs = performance.now() - encodeStart;
     wself.postMessage(
       {
         type: "frame",
@@ -76,6 +106,8 @@ async function process(request: EncodeRequest): Promise<void> {
         bytes,
         width: request.width,
         height: request.height,
+        encodeId: request.encodeId,
+        encodeMs,
       },
       [bytes]
     );

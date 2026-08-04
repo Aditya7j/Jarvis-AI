@@ -16,7 +16,7 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   try {
-    const description = await aiService.generateVision({
+    const description = await aiService.analyzeCameraFrame({
       imageBase64: body.image,
       prompt: body.prompt,
       mimeType: body.mimeType,

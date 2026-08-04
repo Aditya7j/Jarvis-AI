@@ -2,6 +2,7 @@ import type {
   GenerateTextOptions,
   ProviderName,
   ProviderStatusDetail,
+  ToolCallResponse,
   VisionChatRequest,
   VisionRequest,
 } from "../types";
@@ -18,6 +19,8 @@ export interface AIProvider {
   generateText(options: GenerateTextOptions): Promise<string>;
 
   streamText(options: GenerateTextOptions): AsyncGenerator<string, void, void>;
+
+  generateWithTools?(options: GenerateTextOptions): Promise<ToolCallResponse>;
 
   generateVision(request: VisionRequest): Promise<string>;
 

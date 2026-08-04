@@ -134,7 +134,7 @@ export class OpenAIProvider extends BaseProvider<OpenAI> {
             | { type: "image_url"; image_url: { url: string } }
           >;
     }> = request.messages.map((m) => ({
-      role: m.role,
+      role: m.role as "system" | "user" | "assistant",
       content: m.content,
     }));
     if (request.images.length > 0) {

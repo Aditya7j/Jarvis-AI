@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
-import { aiLogger, AIError, toErrorPayload } from "../../src/lib/ai";
+import { aiLogger } from "../../src/lib/ai";
+import { transcribeAudio } from "../../src/lib/ai/whisper";
 
 export const sttRoutes: FastifyPluginAsync = async (fastify) => {
   const log = aiLogger.child("stt");
@@ -11,17 +12,6 @@ export const sttRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   fastify.post("/transcribe", async (request, reply) => {
-    const apiKey = process.env.DEEPGRAM_API_KEY?.trim();
-    if (!apiKey) {
-      return reply.code(400).send({
-        error: {
-          code: "INVALID_REQUEST",
-          message:
-            "Deepgram is not configured. Set DEEPGRAM_API_KEY in .env to enable speech-to-text in browsers without built-in voice input.",
-        },
-      });
-    }
-
     const audio = request.body as Buffer;
     if (!Buffer.isBuffer(audio) || audio.length === 0) {
       return reply.code(400).send({
@@ -33,47 +23,33 @@ export const sttRoutes: FastifyPluginAsync = async (fastify) => {
       (request.headers["content-type"] as string) || "audio/webm";
 
     try {
-      const startedAt = Date.now();
-      const res = await fetch("https://api.deepgram.com/v1/listen", {
-        method: "POST",
-        headers: {
-          Authorization: `Token ${apiKey}`,
-          "Content-Type": mimeType,
-        },
-        body: audio,
-      });
-      const body = (await res.json().catch(() => null)) as {
-        results?: {
-          channels?: Array<{ alternatives?: Array<{ transcript?: string }> }>;
-        };
-        err_msg?: string;
-      } | null;
-
-      if (!res.ok || !body) {
-        const detail = body?.err_msg ? ` — ${body.err_msg}` : "";
-        throw new AIError(
-          `Deepgram transcription failed (${res.status})${detail}.`,
-          res.status === 401 ? "AUTH_FAILED" : "CONNECTION_FAILED",
-          "unknown",
-          res.status
-        );
+      const result = await transcribeAudio(audio, mimeType);
+      if (!result) {
+        return reply.code(400).send({
+          error: {
+            code: "INVALID_REQUEST",
+            message:
+              "Speech-to-text is unavailable. Install Whisper locally (WHISPER_COMMAND), run a Whisper server (WHISPER_SERVER_URL), or set DEEPGRAM_API_KEY in .env.",
+          },
+        });
       }
-
-      const transcript =
-        body.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";
       log.info("Transcription completed", {
+        engine: result.engine,
         audioBytes: audio.length,
-        latencyMs: Date.now() - startedAt,
-        transcriptChars: transcript.length,
+        latencyMs: result.latencyMs,
+        transcriptChars: result.transcript.length,
       });
-      return { transcript, timestamp: Date.now() };
+      return { transcript: result.transcript, engine: result.engine, timestamp: Date.now() };
     } catch (error) {
-      const mapped = toErrorPayload(error);
       log.warn("Transcription failed", {
-        code: mapped.code,
-        message: mapped.message,
+        message: error instanceof Error ? error.message : String(error),
       });
-      return reply.code(502).send({ error: mapped });
+      return reply.code(502).send({
+        error: {
+          code: "PROVIDER_ERROR",
+          message: "Speech-to-text failed unexpectedly.",
+        },
+      });
     }
   });
 };

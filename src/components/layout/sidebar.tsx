@@ -15,6 +15,7 @@ import {
   CheckSquare,
   HardDrive,
   User,
+  Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
@@ -25,6 +26,7 @@ const navItems = [
   { icon: Bot, label: "Dashboard", href: "/dashboard" },
   { icon: MessageSquare, label: "Conversations", href: "/dashboard/conversations" },
   { icon: Eye, label: "Vision", href: "/dashboard/vision" },
+  { icon: Activity, label: "Metrics", href: "/dashboard/metrics" },
   { icon: CheckSquare, label: "Tasks", href: "/dashboard/tasks" },
   { icon: Calendar, label: "Calendar", href: "/dashboard/calendar" },
   { icon: User, label: "Profile", href: "/dashboard/profile" },

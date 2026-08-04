@@ -2,14 +2,28 @@ import { randomUUID } from "crypto";
 import { loadEnvConfig, type EnvConfig } from "./config";
 import { AIError, isAbortError, toAIError } from "./errors";
 import { aiLogger } from "./logger";
+import {
+  attemptEnded,
+  attemptStarted,
+  type MetricEndStatus,
+  type MetricKind,
+} from "../metrics/metrics";
 import { appendMemoryContext, memoryService } from "../memory";
 import { DEFAULT_SYSTEM_PROMPT } from "./prompts";
 import { clearRuntimeKey, getRuntimeKey, setRuntimeKey } from "./registry";
+import {
+  detectPiper,
+  detectWhisper,
+  resolveSttEngine,
+  resolveTtsEngine,
+} from "./local-tools";
 import { AnthropicProvider } from "./providers/anthropic";
 import { GeminiProvider } from "./providers/gemini";
 import { OllamaProvider } from "./providers/ollama";
 import { OpenAIProvider } from "./providers/openai";
 import type { AIProvider } from "./providers/types";
+import { describeRoles, roleModelName, type ModelRole } from "./router";
+import { executeTool } from "./tools";
 import { APP_VERSION } from "./version";
 import type {
   AIMessageInput,
@@ -36,6 +50,78 @@ export class AIProviderService {
   private readonly failures = new Map<ProviderName, { until: number; code: string }>();
   private cachedHealth: HealthSummary | null = null;
   private readonly log = aiLogger.child("service");
+
+  private beginAttempt(
+    kind: MetricKind,
+    provider: ProviderName,
+    model: string | null | undefined
+  ): { id: string; startedAt: number } {
+    const id = randomUUID();
+    const startedAt = Date.now();
+    attemptStarted({ id, kind, provider, model: model ?? "unknown", startedAt });
+    return { id, startedAt };
+  }
+
+  private endAttempt(
+    id: string,
+    startedAt: number,
+    status: MetricEndStatus,
+    extra?: {
+      ttfbMs?: number | null;
+      chars?: number | null;
+      errorCode?: string | null;
+      message?: string | null;
+    }
+  ): void {
+    attemptEnded({
+      id,
+      status,
+      durationMs: Date.now() - startedAt,
+      ttfbMs: extra?.ttfbMs ?? null,
+      chars: extra?.chars ?? null,
+      errorCode: extra?.errorCode ?? null,
+      message: extra?.message ?? null,
+    });
+  }
+
+  private static statusFor(error: AIError): MetricEndStatus {
+    if (error.code === "CONNECTION_TIMEOUT") return "timeout";
+    if (isAbortError(error)) return "aborted";
+    return "error";
+  }
+
+  private async *trackedStream(
+    kind: MetricKind,
+    provider: ProviderName,
+    model: string | null | undefined,
+    generator: AsyncGenerator<string>
+  ): AsyncGenerator<string> {
+    const attempt = this.beginAttempt(kind, provider, model);
+    let ttfbMs: number | null = null;
+    let chars = 0;
+    try {
+      const iterator = generator[Symbol.asyncIterator]();
+      for (;;) {
+        const next = await iterator.next();
+        if (next.done) {
+          this.endAttempt(attempt.id, attempt.startedAt, "ok", { ttfbMs, chars });
+          return;
+        }
+        if (ttfbMs === null) ttfbMs = Date.now() - attempt.startedAt;
+        chars += next.value.length;
+        yield next.value;
+      }
+    } catch (error) {
+      const mapped = toAIError(error, provider);
+      this.endAttempt(attempt.id, attempt.startedAt, AIProviderService.statusFor(mapped), {
+        ttfbMs,
+        chars,
+        errorCode: mapped.code,
+        message: mapped.message,
+      });
+      throw error;
+    }
+  }
 
   constructor() {
     this.config = loadEnvConfig();
@@ -77,6 +163,7 @@ export class AIProviderService {
         baseUrl: this.config.ollamaBaseUrl,
         model: this.config.ollamaModel,
         timeoutMs: this.config.requestTimeoutMs,
+        visionTimeoutMs: this.config.visionTimeoutMs,
         healthTimeoutMs: this.config.healthTimeoutMs,
       })
     );
@@ -109,7 +196,7 @@ export class AIProviderService {
   get noProviderMessage(): string {
     const configured = this.configuredProviders();
     if (configured.length === 0) {
-      return `No AI providers configured. Add GEMINI_API_KEY to your .env file (get one at https://aistudio.google.com/app/apikey), or start Ollama locally at ${this.config.ollamaBaseUrl}.`;
+      return `No AI providers configured. Add GEMINI_API_KEY to your .env file (get one at https://aistudio.google.com/app/apikey), or start Ollama locally at ${this.config.ollamaBaseUrl} with a fast model (e.g. "ollama pull gemma3:4b").`;
     }
     return `AI providers are configured but all failed. Check the server logs for details, or start Ollama at ${this.config.ollamaBaseUrl}.`;
   }
@@ -141,6 +228,31 @@ export class AIProviderService {
     return this.configuredProviders().filter(
       (provider) => !this.isInCooldown(provider.name)
     );
+  }
+
+  /**
+   * AI Router: order candidates by role. Local Ollama is always tried first
+   * for both reasoning and vision routes (see roleModelName); cloud providers
+   * act as graceful fallbacks when Ollama is unavailable.
+   */
+  private orderedCandidates(role: ModelRole, visionOnly: boolean): AIProvider[] {
+    const active = this.candidates().filter(
+      (provider) => !visionOnly || provider.supportsVision()
+    );
+    const ollama = active.find((provider) => provider.name === "ollama");
+    const rest = active.filter((provider) => provider.name !== "ollama");
+    return ollama ? [ollama, ...rest] : rest;
+  }
+
+  private routeOptions<T extends { model?: string }>(
+    provider: AIProvider,
+    options: T,
+    role: ModelRole
+  ): T {
+    if (provider.name !== "ollama") return options;
+    const hint = roleModelName(this.config, role);
+    if (!hint) return options;
+    return { ...options, model: hint };
   }
 
   private withSystemContext(options: GenerateTextOptions): GenerateTextOptions {
@@ -176,7 +288,7 @@ export class AIProviderService {
     const requestOptions = await this.withMemoryContext(
       this.withSystemContext(options)
     );
-    const candidates = this.candidates();
+    const candidates = this.orderedCandidates("reasoning", false);
     if (candidates.length === 0) {
       throw new AIError(this.noProviderMessage, "NO_PROVIDER", "unknown");
     }
@@ -184,13 +296,23 @@ export class AIProviderService {
     let lastError: AIError | null = null;
     for (const provider of candidates) {
       const requestId = randomUUID();
+      const routed = this.routeOptions(provider, requestOptions, "reasoning");
+      const model = provider.getModel() ?? routed.model;
+      const kind: MetricKind = routed.tools?.length ? "tools" : "text";
+      const attempt = this.beginAttempt(kind, provider.name, model);
       this.log.info(`Selecting provider: ${provider.name}`, {
         requestId,
-        model: provider.getModel(),
+        model,
       });
       try {
-        const text = await provider.generateText(requestOptions);
+        const text =
+          routed.tools?.length && typeof provider.generateWithTools === "function"
+            ? await this.runToolLoop(provider, routed)
+            : await provider.generateText(routed);
         this.markSuccess(provider.name);
+        this.endAttempt(attempt.id, attempt.startedAt, "ok", {
+          chars: text.length,
+        });
         this.log.info(`Provider responded: ${provider.name}`, {
           requestId,
           chars: text.length,
@@ -199,11 +321,19 @@ export class AIProviderService {
       } catch (error) {
         const mapped = toAIError(error, provider.name);
         if (isAbortError(mapped)) {
+          this.endAttempt(attempt.id, attempt.startedAt, "aborted", {
+            errorCode: mapped.code,
+            message: mapped.message,
+          });
           this.log.info(`${provider.name} request aborted`, { requestId });
           throw mapped;
         }
         lastError = mapped;
         this.markFailure(provider.name, mapped);
+        this.endAttempt(attempt.id, attempt.startedAt, AIProviderService.statusFor(mapped), {
+          errorCode: mapped.code,
+          message: mapped.message,
+        });
         this.log.warn(
           `${provider.name} unavailable: ${mapped.message}`,
           { requestId, code: mapped.code }
@@ -219,20 +349,70 @@ export class AIProviderService {
     const requestOptions = await this.withMemoryContext(
       this.withSystemContext(options)
     );
-    const candidates = this.candidates();
+    const candidates = this.orderedCandidates("reasoning", false);
     if (candidates.length === 0) {
       throw new AIError(this.noProviderMessage, "NO_PROVIDER", "unknown");
+    }
+
+    if (options.tools?.length) {
+      let lastError: AIError | null = null;
+      for (const provider of candidates) {
+        if (typeof provider.generateWithTools !== "function") continue;
+        const attempt = this.beginAttempt(
+          "tools",
+          provider.name,
+          provider.getModel() ?? requestOptions.model
+        );
+        try {
+          const text = await this.runToolLoop(provider, requestOptions);
+          this.markSuccess(provider.name);
+          this.endAttempt(attempt.id, attempt.startedAt, "ok", {
+            chars: text.length,
+          });
+          if (text) yield text;
+          return;
+        } catch (error) {
+          const mapped = toAIError(error, provider.name);
+          if (isAbortError(mapped)) {
+            this.endAttempt(attempt.id, attempt.startedAt, "aborted", {
+              errorCode: mapped.code,
+              message: mapped.message,
+            });
+            throw mapped;
+          }
+          lastError = mapped;
+          this.markFailure(provider.name, mapped);
+          this.endAttempt(attempt.id, attempt.startedAt, AIProviderService.statusFor(mapped), {
+            errorCode: mapped.code,
+            message: mapped.message,
+          });
+          this.log.warn(
+            `${provider.name} tool streaming unavailable: ${mapped.message}`,
+            { code: mapped.code }
+          );
+        }
+      }
+      this.log.error("All tool-enabled providers failed", {
+        lastError: lastError?.message,
+      });
+      throw lastError ?? new AIError(this.noProviderMessage, "NO_PROVIDER", "unknown");
     }
 
     let lastError: AIError | null = null;
     for (const provider of candidates) {
       const requestId = randomUUID();
+      const routed = this.routeOptions(provider, requestOptions, "reasoning");
       this.log.info(`Selecting streaming provider: ${provider.name}`, {
         requestId,
-        model: provider.getModel(),
+        model: provider.getModel() ?? routed.model,
       });
       try {
-        const stream = provider.streamText(requestOptions);
+        const stream = this.trackedStream(
+          "stream",
+          provider.name,
+          provider.getModel() ?? routed.model,
+          provider.streamText(routed)
+        );
         const first = await stream.next();
         if (first.done) {
           this.markSuccess(provider.name);
@@ -263,6 +443,76 @@ export class AIProviderService {
     throw lastError ?? new AIError(this.noProviderMessage, "NO_PROVIDER", "unknown");
   }
 
+  /**
+   * Analyze a camera frame for the chat pipeline. Gemma 3 (via Ollama) is the
+   * ONLY model allowed to analyze camera frames; there is deliberately no cloud
+   * fallback, so an unavailable Gemma 3 never gets replaced by a model that
+   * could hallucinate visual details.
+   */
+  async analyzeCameraFrame(request: VisionRequest): Promise<string> {
+    const ollama = this.providers.get("ollama");
+    if (!ollama) {
+      throw new AIError(
+        "Ollama (Gemma 3) is required to analyze camera frames but is not available.",
+        "NO_PROVIDER",
+        "ollama"
+      );
+    }
+    const gemma3Model = await (ollama as OllamaProvider).resolveGemma3Model();
+    if (!gemma3Model) {
+      throw new AIError(
+        "Gemma 3 is not installed on Ollama. Run \"ollama pull gemma3:4b\" so camera frames can be analyzed.",
+        "MODEL_UNAVAILABLE",
+        "ollama"
+      );
+    }
+    const requestId = randomUUID();
+    const attempt = this.beginAttempt("camera-frame", "ollama", gemma3Model);
+    this.log.info("Selecting frame analysis provider: Gemma 3 (ollama)", {
+      requestId,
+      model: gemma3Model,
+    });
+    try {
+      const text = await ollama.generateVision({ ...request, model: gemma3Model });
+      this.markSuccess("ollama");
+      this.endAttempt(attempt.id, attempt.startedAt, "ok", {
+        chars: text.length,
+      });
+      this.log.info("Gemma 3 frame analysis finished", {
+        requestId,
+        model: gemma3Model,
+        chars: text.length,
+      });
+      return text;
+    } catch (error) {
+      const mapped = toAIError(error, "ollama");
+      if (isAbortError(mapped)) {
+        this.endAttempt(attempt.id, attempt.startedAt, "aborted", {
+          errorCode: mapped.code,
+          message: mapped.message,
+        });
+        this.log.info("Gemma 3 frame analysis aborted (superseded or cancelled)", {
+          requestId,
+          model: gemma3Model,
+        });
+        throw mapped;
+      }
+      this.markFailure("ollama", mapped);
+      this.endAttempt(attempt.id, attempt.startedAt, AIProviderService.statusFor(mapped), {
+        errorCode: mapped.code,
+        message: mapped.message,
+      });
+      this.log.error("✕ Gemma 3 frame analysis failed", {
+        requestId,
+        model: gemma3Model,
+        code: mapped.code,
+        message: mapped.message,
+        status: mapped.status ?? null,
+      });
+      throw mapped;
+    }
+  }
+
   async generateVision(
     request: VisionRequest,
     options: { trackFailures?: boolean; includeMemory?: boolean } = {}
@@ -272,9 +522,7 @@ export class AIProviderService {
       options.includeMemory === false
         ? request
         : await this.withMemoryPrompt(request);
-    const candidates = this.candidates().filter((provider) =>
-      provider.supportsVision()
-    );
+    const candidates = this.orderedCandidates("vision", true);
     if (candidates.length === 0) {
       throw new AIError(
         "No AI provider with vision support is available. Configure Gemini or run a multimodal Ollama model.",
@@ -286,15 +534,24 @@ export class AIProviderService {
     let lastError: AIError | null = null;
     for (const provider of candidates) {
       const requestId = randomUUID();
+      const routed = this.routeOptions(provider, requestWithMemory, "vision");
+      const attempt = this.beginAttempt(
+        "vision",
+        provider.name,
+        provider.getModel() ?? routed.model
+      );
       this.log.info(`Selecting vision provider: ${provider.name}`, {
         requestId,
-        model: provider.getModel(),
+        model: provider.getModel() ?? routed.model,
       });
       try {
-        const text = await provider.generateVision(requestWithMemory);
+        const text = await provider.generateVision(routed);
         if (trackFailures) {
           this.markSuccess(provider.name);
         }
+        this.endAttempt(attempt.id, attempt.startedAt, "ok", {
+          chars: text.length,
+        });
         this.log.info(`Vision provider responded: ${provider.name}`, {
           requestId,
         });
@@ -305,6 +562,10 @@ export class AIProviderService {
         if (trackFailures) {
           this.markFailure(provider.name, mapped);
         }
+        this.endAttempt(attempt.id, attempt.startedAt, AIProviderService.statusFor(mapped), {
+          errorCode: mapped.code,
+          message: mapped.message,
+        });
         this.log.warn(
           `${provider.name} vision unavailable: ${mapped.message}`,
           { requestId, code: mapped.code }
@@ -321,10 +582,8 @@ export class AIProviderService {
   ): Promise<string> {
     const trackFailures = options.trackFailures ?? false;
     const requestWithMemory = await this.withMemoryContext(request);
-    const candidates = this.candidates().filter(
-      (provider) =>
-        provider.supportsVision() &&
-        typeof provider.generateVisionChat === "function"
+    const candidates = this.orderedCandidates("vision", true).filter(
+      (provider) => typeof provider.generateVisionChat === "function"
     );
     if (candidates.length === 0) {
       throw new AIError(
@@ -337,15 +596,24 @@ export class AIProviderService {
     let lastError: AIError | null = null;
     for (const provider of candidates) {
       const requestId = randomUUID();
+      const routed = this.routeOptions(provider, requestWithMemory, "vision");
+      const attempt = this.beginAttempt(
+        "vision-chat",
+        provider.name,
+        provider.getModel() ?? routed.model
+      );
       this.log.info(`Selecting vision-chat provider: ${provider.name}`, {
         requestId,
-        model: provider.getModel(),
+        model: provider.getModel() ?? routed.model,
       });
       try {
-        const text = await provider.generateVisionChat!(requestWithMemory);
+        const text = await provider.generateVisionChat!(routed);
         if (trackFailures) {
           this.markSuccess(provider.name);
         }
+        this.endAttempt(attempt.id, attempt.startedAt, "ok", {
+          chars: text.length,
+        });
         this.log.info(`Vision-chat provider responded: ${provider.name}`, {
           requestId,
           chars: text.length,
@@ -354,6 +622,10 @@ export class AIProviderService {
       } catch (error) {
         const mapped = toAIError(error, provider.name);
         if (isAbortError(mapped)) {
+          this.endAttempt(attempt.id, attempt.startedAt, "aborted", {
+            errorCode: mapped.code,
+            message: mapped.message,
+          });
           this.log.info(`${provider.name} vision-chat request aborted`, {
             requestId,
           });
@@ -363,6 +635,10 @@ export class AIProviderService {
         if (trackFailures) {
           this.markFailure(provider.name, mapped);
         }
+        this.endAttempt(attempt.id, attempt.startedAt, AIProviderService.statusFor(mapped), {
+          errorCode: mapped.code,
+          message: mapped.message,
+        });
         this.log.warn(
           `${provider.name} vision-chat unavailable: ${mapped.message}`,
           { requestId, code: mapped.code }
@@ -382,10 +658,8 @@ export class AIProviderService {
   ): AsyncGenerator<string> {
     const trackFailures = options.trackFailures ?? false;
     const requestWithMemory = await this.withMemoryContext(request);
-    const candidates = this.candidates().filter(
-      (provider) =>
-        provider.supportsVision() &&
-        typeof provider.streamVisionChat === "function"
+    const candidates = this.orderedCandidates("vision", true).filter(
+      (provider) => typeof provider.streamVisionChat === "function"
     );
     if (candidates.length === 0) {
       throw new AIError(
@@ -398,12 +672,18 @@ export class AIProviderService {
     let lastError: AIError | null = null;
     for (const provider of candidates) {
       const requestId = randomUUID();
+      const routed = this.routeOptions(provider, requestWithMemory, "vision");
       this.log.info(`Selecting streaming vision provider: ${provider.name}`, {
         requestId,
-        model: provider.getModel(),
+        model: provider.getModel() ?? routed.model,
       });
       try {
-        const stream = provider.streamVisionChat!(requestWithMemory);
+        const stream = this.trackedStream(
+          "vision-chat",
+          provider.name,
+          provider.getModel() ?? routed.model,
+          provider.streamVisionChat!(routed)
+        );
         const first = await stream.next();
         if (first.done) {
           if (trackFailures) {
@@ -442,6 +722,60 @@ export class AIProviderService {
     );
   }
 
+  /**
+   * Agent orchestration: when the caller requests tool calling, run a bounded
+   * loop that hands the model's tool calls to the local tool registry and feeds
+   * the results back until the model produces a final text response or the
+   * iteration budget is exhausted. Only engaged when `options.tools` is set,
+   * so the default chat/vision paths are untouched.
+   */
+  private async runToolLoop(
+    provider: AIProvider,
+    options: GenerateTextOptions
+  ): Promise<string> {
+    const maxIterations =
+      options.maxToolIterations ?? this.config.maxToolIterations;
+    const generateWithTools = provider.generateWithTools;
+    if (!generateWithTools) return provider.generateText(options);
+
+    let messages = options.messages;
+    let routed = { ...options, messages };
+    let lastContent = "";
+
+    for (let iteration = 0; iteration < maxIterations; iteration++) {
+      const { content, toolCalls } = await generateWithTools.call(provider, routed);
+      lastContent = content;
+      if (toolCalls.length === 0) {
+        this.log.info("Tool orchestration finished", {
+          provider: provider.name,
+          iterations: iteration + 1,
+        });
+        return content;
+      }
+
+      const next: AIMessageInput[] = [...messages];
+      next.push({ role: "assistant", content: content || "" });
+      for (const call of toolCalls) {
+        const output = await executeTool(call.name, call.arguments);
+        next.push({ role: "tool", content: output, name: call.name });
+      }
+      messages = next;
+      routed = { ...options, messages };
+      this.log.info("Tool orchestration iteration", {
+        provider: provider.name,
+        iteration: iteration + 1,
+        toolCalls: toolCalls.map((call) => call.name),
+        remaining: maxIterations - iteration - 1,
+      });
+    }
+
+    this.log.warn("Tool orchestration reached iteration budget", {
+      provider: provider.name,
+      maxIterations,
+    });
+    return lastContent || "Tool orchestration completed without a final response.";
+  }
+
   async healthCheck(options: { force?: boolean } = {}): Promise<HealthSummary> {
     if (
       !options.force &&
@@ -456,10 +790,19 @@ export class AIProviderService {
     const entries = await Promise.all(
       PROVIDER_PRIORITY.map(async (name) => {
         const provider = this.providers.get(name)!;
+        const attempt = this.beginAttempt("health", name, provider.getModel());
         try {
-          return await provider.healthCheck();
+          const detail = await provider.healthCheck();
+          this.endAttempt(attempt.id, attempt.startedAt, "ok", {
+            ttfbMs: detail.latencyMs,
+          });
+          return detail;
         } catch (error) {
           const mapped = toAIError(error, name);
+          this.endAttempt(attempt.id, attempt.startedAt, AIProviderService.statusFor(mapped), {
+            errorCode: mapped.code,
+            message: mapped.message,
+          });
           return {
             provider: name,
             status: "error",
@@ -488,27 +831,55 @@ export class AIProviderService {
           : "online";
     const firstConnected = connected[0] ?? null;
 
+    const ollamaConnected = byName.ollama.status === "connected";
+    const cloudConnected = connected.filter(
+      (entry) => entry.provider !== "ollama"
+    );
+    const cloudProvider = cloudConnected[0]?.provider ?? null;
+    const cloudModel = cloudConnected[0]?.model ?? null;
+
+    const [whisper, piper] = await Promise.all([
+      detectWhisper(this.config),
+      detectPiper(this.config),
+    ]);
+    const stt = resolveSttEngine(this.config, whisper);
+    const tts = resolveTtsEngine(this.config, piper);
+    const capabilities = describeRoles(
+      this.config,
+      ollamaConnected,
+      byName.ollama.model,
+      byName.ollama.vision,
+      byName.ollama.visionModel ?? null,
+      cloudProvider,
+      cloudModel,
+      stt,
+      tts
+    );
+
+    const activeProvider = capabilities.reasoning.provider ?? "none";
+
     const health: HealthSummary = {
-      provider: firstConnected?.provider ?? "none",
+      provider: activeProvider,
       status,
-      activeModel: firstConnected?.model ?? null,
+      activeModel: capabilities.reasoning.model ?? firstConnected?.model ?? null,
       gemini: byName.gemini,
       openai: byName.openai,
       anthropic: byName.anthropic,
       ollama: byName.ollama,
+      capabilities,
       version: APP_VERSION,
       timestamp: Date.now(),
     };
 
     this.log.info(
-      `Health check complete: ${status} (active: ${health.provider}, model: ${health.activeModel ?? "none"})`
+      `Health check complete: ${status} (reasoning: ${capabilities.reasoning.provider}/${capabilities.reasoning.model ?? "none"}, vision: ${capabilities.vision.provider}/${capabilities.vision.model ?? "none"}, stt: ${stt.engine}, tts: ${tts.engine})`
     );
     this.cachedHealth = health;
     return health;
   }
 
   async listModels(): Promise<{ provider: ProviderName; models: string[] }> {
-    const active = this.configuredProviders()[0];
+    const active = this.orderedCandidates("reasoning", false)[0];
     if (!active) {
       throw new AIError(this.noProviderMessage, "NO_PROVIDER", "unknown");
     }

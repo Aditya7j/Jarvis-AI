@@ -6,6 +6,9 @@ const nextConfig = {
   },
   experimental: {
     optimizePackageImports: ["lucide-react"],
+    // onnxruntime-node ships native .node binaries that must be loaded via
+    // require() at runtime, not bundled by webpack.
+    serverComponentsExternalPackages: ["onnxruntime-node"],
   },
   images: {
     remotePatterns: [

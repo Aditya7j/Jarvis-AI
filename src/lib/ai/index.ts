@@ -8,6 +8,29 @@ export {
   setRuntimeKey,
   clearRuntimeKey,
 } from "./registry";
+export {
+  roleModelName,
+  describeRoles,
+  pickLocalVisionModel,
+  isVisionModel,
+  isReasoningModel,
+  VISION_KEYWORDS,
+} from "./router";
+export {
+  JARVIS_TOOLS,
+  executeTool,
+  registerTool,
+  hasTool,
+} from "./tools";
+export type { ToolExecutor } from "./tools";
+export type {
+  ModelRole,
+  RouterCapabilities,
+  RouterModelInfo,
+  RouterSttInfo,
+  RouterTtsInfo,
+} from "./router";
+export type { EnvConfig } from "./config";
 export type {
   AIMessageInput,
   ChatRole,
@@ -17,5 +40,7 @@ export type {
   ProviderStatusDetail,
   ProviderStatusType,
   ToolCall,
+  ToolCallInvocation,
+  ToolCallResponse,
   VisionRequest,
 } from "./types";

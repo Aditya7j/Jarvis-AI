@@ -1,13 +1,23 @@
 import type { VisionImage } from "@/lib/ai/types";
 import { useVisionStore } from "@/stores/vision-store";
 import type { CameraFrame, CameraSource, CameraStats, FrameListener } from "./types";
+import { applyEnhancements } from "./enhance";
 
 const MAX_CAPTURE_DIMENSION = 640;
+const MAX_ANALYSIS_DIMENSION = 1920;
+const MAX_LIVE_DIMENSION = 960;
 const WEBCAM_CAPTURE_INTERVAL_MS = 1000;
 const SCREEN_CAPTURE_INTERVAL_MS = 700;
 const JPEG_QUALITY = 0.6;
+const ANALYSIS_JPEG_QUALITY = 0.85;
+const LIVE_JPEG_QUALITY = 0.75;
 const ENCODE_TIMEOUT_MS = 3000;
 const CAPTURE_READY_TIMEOUT_MS = 3000;
+const FRAME_HISTORY_LIMIT = 5;
+/** Center-weighted crop keeps the middle of the frame and biases toward the
+ * user's hands (lower-center) for live object detection. */
+const CENTER_FOCUS_FRACTION = 0.72;
+const CENTER_FOCUS_DOWN_SHIFT = 0.04;
 const WEBCAM_CONSTRAINTS: MediaTrackConstraints = {
   width: { ideal: 1280 },
   height: { ideal: 720 },
@@ -19,6 +29,13 @@ const SCREEN_CONSTRAINTS: DisplayMediaStreamOptions = {
 
 type EncodingMode = "worker" | "main" | "pending";
 
+interface CropRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 interface EncodeRequest {
   type: "encode";
   source: CameraSource;
@@ -26,6 +43,8 @@ interface EncodeRequest {
   width: number;
   height: number;
   quality: number;
+  crop?: CropRegion | null;
+  encodeId: number;
 }
 
 interface WorkerFrameMessage {
@@ -34,6 +53,8 @@ interface WorkerFrameMessage {
   bytes: ArrayBuffer;
   width: number;
   height: number;
+  encodeId: number;
+  encodeMs?: number;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -61,6 +82,7 @@ class CameraService {
   private rvfcHandles: Partial<Record<CameraSource, number>> = {};
   private fallbackTimers: Partial<Record<CameraSource, number>> = {};
   private latest: Partial<Record<CameraSource, CameraFrame>> = {};
+  private history: Partial<Record<CameraSource, CameraFrame[]>> = {};
   private frameListeners = new Set<FrameListener>();
   private stats: Record<CameraSource, CameraStats> = {
     webcam: { mode: "main", fps: 0, frames: 0, active: false, lastCaptureAt: 0 },
@@ -70,9 +92,15 @@ class CameraService {
   private frameTimes: Partial<Record<CameraSource, number>> = {};
   private encodingInFlight: Record<CameraSource, boolean> = { webcam: false, screen: false };
   private encodeIds: Partial<Record<CameraSource, number>> = {};
+  private encodeSeq = 0;
+  private pendingEncodes = new Map<
+    number,
+    { resolve: (frame: CameraFrame) => void; reject: (error: Error) => void; source: CameraSource }
+  >();
   private worker: Worker | null = null;
   private workerMode: EncodingMode = "pending";
   private captureCanvas: HTMLCanvasElement | null = null;
+  private analysisCanvas: HTMLCanvasElement | null = null;
   private visibilityPaused = false;
   private visibilityHandler: (() => void) | null = null;
   private pageHideHandler: (() => void) | null = null;
@@ -124,6 +152,10 @@ class CameraService {
       this.worker.terminate();
       this.worker = null;
     }
+    for (const [, pending] of this.pendingEncodes) {
+      pending.reject(new Error("Encode worker terminated"));
+    }
+    this.pendingEncodes.clear();
   }
 
   private useWorkerEncoding(): boolean {
@@ -160,6 +192,34 @@ class CameraService {
       width: Math.max(1, Math.round(videoWidth * scale)),
       height: Math.max(1, Math.round(videoHeight * scale)),
     };
+  }
+
+  private analysisScaledDimensions(videoWidth: number, videoHeight: number): { width: number; height: number } {
+    const scale = Math.min(1, MAX_ANALYSIS_DIMENSION / Math.max(videoWidth, videoHeight));
+    return {
+      width: Math.max(1, Math.round(videoWidth * scale)),
+      height: Math.max(1, Math.round(videoHeight * scale)),
+    };
+  }
+
+  private liveScaledDimensions(videoWidth: number, videoHeight: number): { width: number; height: number } {
+    const scale = Math.min(1, MAX_LIVE_DIMENSION / Math.max(videoWidth, videoHeight));
+    return {
+      width: Math.max(1, Math.round(videoWidth * scale)),
+      height: Math.max(1, Math.round(videoHeight * scale)),
+    };
+  }
+
+  /** Center-weighted crop region in source pixel coordinates. */
+  private centerFocusCrop(videoWidth: number, videoHeight: number): CropRegion {
+    const cropW = Math.max(1, Math.round(videoWidth * CENTER_FOCUS_FRACTION));
+    const cropH = Math.max(1, Math.round(videoHeight * CENTER_FOCUS_FRACTION));
+    const x = Math.max(0, Math.round((videoWidth - cropW) / 2));
+    const y = Math.max(
+      0,
+      Math.min(videoHeight - cropH, Math.round((videoHeight - cropH) / 2 + videoHeight * CENTER_FOCUS_DOWN_SHIFT))
+    );
+    return { x, y, width: cropW, height: cropH };
   }
 
   private intervalFor(source: CameraSource): number {
@@ -238,7 +298,8 @@ class CameraService {
       const frame = new VideoFrame(video, { timestamp: video.currentTime * 1e6 });
       this.lastCaptureAt[source] = now;
       this.encodingInFlight[source] = true;
-      const encodeId = (this.encodeIds[source] = (this.encodeIds[source] ?? 0) + 1);
+      const encodeId = ++this.encodeSeq;
+      this.encodeIds[source] = encodeId;
       const request: EncodeRequest = {
         type: "encode",
         source,
@@ -246,6 +307,7 @@ class CameraService {
         width,
         height,
         quality: JPEG_QUALITY,
+        encodeId,
       };
       worker.postMessage(request, [frame]);
       window.setTimeout(() => {
@@ -283,22 +345,64 @@ class CameraService {
     if (frame) this.cacheAndNotify(source, frame);
   }
 
-  private captureFromVideo(source: CameraSource, video: HTMLVideoElement): CameraFrame | null {
+  private captureFromVideo(
+    source: CameraSource,
+    video: HTMLVideoElement,
+    options?: {
+      width?: number;
+      height?: number;
+      crop?: CropRegion | null;
+      quality?: number;
+      canvas?: HTMLCanvasElement | null;
+    }
+  ): CameraFrame | null {
     const { width, height } = this.scaledDimensions(video.videoWidth, video.videoHeight);
-    const canvas = this.captureCanvas ?? (this.captureCanvas = document.createElement("canvas"));
-    canvas.width = width;
-    canvas.height = height;
+    const targetWidth = options?.width ?? width;
+    const targetHeight = options?.height ?? height;
+    const quality = options?.quality ?? JPEG_QUALITY;
+    const crop = options?.crop ?? null;
+    const canvas = options?.canvas ?? this.captureCanvas ?? (this.captureCanvas = document.createElement("canvas"));
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
-    ctx.drawImage(video, 0, 0, width, height);
-    const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
-    return { source, dataUrl, mimeType: "image/jpeg", width, height, capturedAt: Date.now() };
+    const captureStart = performance.now();
+    if (crop) {
+      ctx.drawImage(
+        video,
+        crop.x,
+        crop.y,
+        crop.width,
+        crop.height,
+        0,
+        0,
+        targetWidth,
+        targetHeight
+      );
+    } else {
+      ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+    }
+    applyEnhancements(ctx, targetWidth, targetHeight);
+    const captureMs = performance.now() - captureStart;
+    const encodeStart = performance.now();
+    const dataUrl = canvas.toDataURL("image/jpeg", quality);
+    const encodeMs = performance.now() - encodeStart;
+    console.info(
+      `[CAM] frame ${targetWidth}x${targetHeight} · capture ${captureMs.toFixed(1)}ms · encode ${encodeMs.toFixed(1)}ms`
+    );
+    return {
+      source,
+      dataUrl,
+      mimeType: "image/jpeg",
+      width: targetWidth,
+      height: targetHeight,
+      capturedAt: Date.now(),
+    };
   }
 
   private handleWorkerMessage = (event: MessageEvent<WorkerFrameMessage>): void => {
     const message = event.data;
     if (message.type !== "frame") return;
-    this.encodingInFlight[message.source] = false;
     const bytes = new Uint8Array(message.bytes);
     const frame: CameraFrame = {
       source: message.source,
@@ -308,11 +412,33 @@ class CameraService {
       height: message.height,
       capturedAt: Date.now(),
     };
+    if (message.encodeMs !== undefined) {
+      console.info(
+        `[CAM] worker encode ${message.width}x${message.height} · ${message.encodeMs.toFixed(1)}ms`
+      );
+    }
+    const pending = this.pendingEncodes.get(message.encodeId);
+    if (pending) {
+      this.pendingEncodes.delete(message.encodeId);
+      if (message.source !== pending.source) {
+        pending.reject(new Error("Live frame source mismatch"));
+        return;
+      }
+      pending.resolve(frame);
+      return;
+    }
+    this.encodingInFlight[message.source] = false;
     this.cacheAndNotify(message.source, frame);
   };
 
   private cacheAndNotify(source: CameraSource, frame: CameraFrame): void {
     this.latest[source] = frame;
+    const history = this.history[source] ?? [];
+    if (!history.some((f) => f.capturedAt === frame.capturedAt)) {
+      history.push(frame);
+      if (history.length > FRAME_HISTORY_LIMIT) history.shift();
+      this.history[source] = history;
+    }
     const stat = this.stats[source];
     stat.active = true;
     stat.frames += 1;
@@ -378,7 +504,7 @@ class CameraService {
     return sources;
   }
 
-  private getActiveSource(): CameraSource | null {
+  getActiveSource(): CameraSource | null {
     if (this.webcamStream) return "webcam";
     if (this.screenStream) return "screen";
     return null;
@@ -420,6 +546,7 @@ class CameraService {
     this.removeVisibilityHandler();
     this.terminateWorker();
     this.captureCanvas = null;
+    this.analysisCanvas = null;
   }
 
   startWebcam = async (): Promise<boolean> => {
@@ -478,6 +605,7 @@ class CameraService {
     }
     this.webcamStream = null;
     this.latest.webcam = undefined;
+    this.history.webcam = undefined;
     this.resetStats("webcam");
     const store = useVisionStore.getState();
     store.setWebcamStream(null);
@@ -494,6 +622,7 @@ class CameraService {
     }
     this.screenStream = null;
     this.latest.screen = undefined;
+    this.history.screen = undefined;
     this.resetStats("screen");
     const store = useVisionStore.getState();
     store.setScreenStream(null);
@@ -517,6 +646,119 @@ class CameraService {
     return frame;
   };
 
+  /**
+   * Capture a full-resolution, high-quality frame for on-demand vision analysis
+   * (Gemma 3). Unlike the live loop (max 960px center crop), this waits for the
+   * video to be fully loaded and encodes at up to 1920px @ 85% JPEG so small
+   * objects and details survive. Does not touch the preview history/latest
+   * buffers.
+   */
+  captureAnalysisFrame = async (
+    sourceArg?: CameraSource | null
+  ): Promise<CameraFrame | null> => {
+    const source = sourceArg ?? this.getActiveSource();
+    if (!source || !this.isSourceActive(source)) return null;
+    const video = this.getVideo(source);
+    const ready = await this.waitAnalysisReady(video);
+    if (!ready) return null;
+    const { width, height } = this.analysisScaledDimensions(
+      video.videoWidth,
+      video.videoHeight
+    );
+    const captureStart = performance.now();
+    const frame = this.captureFromVideo(source, video, {
+      width,
+      height,
+      quality: ANALYSIS_JPEG_QUALITY,
+      canvas: this.analysisCanvas ?? (this.analysisCanvas = document.createElement("canvas")),
+    });
+    if (frame) {
+      console.info(
+        `[CAM] analysis frame ${width}x${height} · total ${(performance.now() - captureStart).toFixed(1)}ms`
+      );
+    }
+    return frame;
+  };
+
+  /**
+   * Fast, non-blocking live capture for the continuous vision pipeline.
+   * Encodes a center-weighted crop (prioritizes the middle of the frame and the
+   * user's hands) at up to 960px @ 75% JPEG, off the main thread when a worker
+   * is available. Returns immediately when the video is not ready so the caller
+   * can skip this tick.
+   */
+  captureLiveFrame = async (
+    sourceArg?: CameraSource | null
+  ): Promise<CameraFrame | null> => {
+    const source = sourceArg ?? this.getActiveSource();
+    if (!source || !this.isSourceActive(source)) return null;
+    const video = this.getVideo(source);
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth === 0) {
+      return null;
+    }
+    const { width, height } = this.liveScaledDimensions(video.videoWidth, video.videoHeight);
+    const crop = this.centerFocusCrop(video.videoWidth, video.videoHeight);
+
+    if (this.useWorkerEncoding()) {
+      const worker = this.worker;
+      if (worker) {
+        return await new Promise<CameraFrame>((resolve, reject) => {
+          try {
+            const frame = new VideoFrame(video, { timestamp: video.currentTime * 1e6 });
+            const encodeId = ++this.encodeSeq;
+            this.pendingEncodes.set(encodeId, { resolve, reject, source });
+            const request: EncodeRequest = {
+              type: "encode",
+              source,
+              frame,
+              width,
+              height,
+              quality: LIVE_JPEG_QUALITY,
+              crop,
+              encodeId,
+            };
+            worker.postMessage(request, [frame]);
+            window.setTimeout(() => {
+              if (this.pendingEncodes.has(encodeId)) {
+                this.pendingEncodes.delete(encodeId);
+                reject(new Error("Live frame encode timed out"));
+              }
+            }, ENCODE_TIMEOUT_MS);
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+    }
+
+    return this.captureFromVideo(source, video, {
+      width,
+      height,
+      crop,
+      quality: LIVE_JPEG_QUALITY,
+    });
+  };
+
+  private async waitAnalysisReady(video: HTMLVideoElement): Promise<boolean> {
+    const ready = (): boolean =>
+      video.readyState >= HTMLMediaElement.HAVE_ENOUGH_DATA &&
+      video.videoWidth > 0 &&
+      video.videoHeight > 0;
+    if (ready()) return true;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < CAPTURE_READY_TIMEOUT_MS) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (ready()) return true;
+    }
+    if (video.videoWidth > 0 && video.videoHeight > 0) {
+      console.warn(
+        "[CAM] Analysis capture timed out waiting for HAVE_ENOUGH_DATA; using available frame"
+      );
+      return true;
+    }
+    return false;
+  }
+
   private async waitReady(video: HTMLVideoElement): Promise<void> {
     if (video.videoWidth > 0 && video.videoHeight > 0) return;
     const startedAt = Date.now();
@@ -526,6 +768,15 @@ class CameraService {
   }
 
   getLatestFrame = (source: CameraSource): CameraFrame | null => this.latest[source] ?? null;
+
+  /**
+   * Return the most recent captured frames for a source, newest first. Used to
+   * attach up to the last few live frames to a vision request.
+   */
+  getRecentFrames = (source: CameraSource, max: number): CameraFrame[] => {
+    const history = this.history[source] ?? [];
+    return history.slice(-max).reverse();
+  };
 
   getStream = (source: CameraSource): MediaStream | null =>
     source === "webcam" ? this.webcamStream : this.screenStream;

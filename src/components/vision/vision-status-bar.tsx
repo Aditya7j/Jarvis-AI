@@ -98,6 +98,7 @@ export function VisionStatusBar() {
   const screenShareActive = useVisionStore((s) => s.screenShareActive);
   const visionError = useVisionStore((s) => s.visionError);
   const setVisionError = useVisionStore((s) => s.setVisionError);
+  const lastAnalysis = useVisionStore((s) => s.lastAnalysis);
 
   const anyActive = webcamActive || screenShareActive;
   if (!anyActive && !visionError) return null;
@@ -148,6 +149,33 @@ export function VisionStatusBar() {
               stopLabel="Stop screen sharing"
             />
           </div>
+        </motion.div>
+      )}
+
+      {lastAnalysis && lastAnalysis.state !== "off" && (
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          className={
+            lastAnalysis.state === "error"
+              ? "flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/85 border border-red-500/30 text-red-300/90 text-[10px] font-mono"
+              : "flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/85 border border-cyan-500/20 text-cyan-300/80 text-[10px] font-mono"
+          }
+        >
+          <span
+            className={
+              lastAnalysis.state === "error"
+                ? "relative inline-flex rounded-full h-1.5 w-1.5 bg-red-400"
+                : "relative inline-flex rounded-full h-1.5 w-1.5 bg-cyan-400"
+            }
+          />
+          {lastAnalysis.state === "error"
+            ? `Vision error: ${lastAnalysis.error ?? "pipeline failed"}`
+            : lastAnalysis.capturedAt
+              ? `Analyzed ${new Date(lastAnalysis.capturedAt).toLocaleTimeString()} · conf ${
+                  lastAnalysis.confidence ?? "-"
+                }% · ${lastAnalysis.objectCount} object(s)`
+              : "Camera ON · awaiting frame analysis"}
         </motion.div>
       )}
     </div>

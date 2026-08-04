@@ -1,0 +1,118 @@
+﻿event: vision
+data: {"vision":{"state":"live","confidence":95,"objectCount":3,"personConfidence":90,"error":null}}
+
+event: vision_state
+data: {"phase":"answering"}
+
+data: {"token":"Not"}
+
+data: {"token":"visible"}
+
+data: {"token":"."}
+
+data: {"token":"The"}
+
+data: {"token":"camera"}
+
+data: {"token":"frame"}
+
+data: {"token":"shows"}
+
+data: {"token":"no"}
+
+data: {"token":"paper"}
+
+data: {"token":"or"}
+
+data: {"token":"text"}
+
+data: {"token":"objects"}
+
+data: {"token":"."}
+
+data: {"token":"The"}
+
+data: {"token":"visible"}
+
+data: {"token":"items"}
+
+data: {"token":"are"}
+
+data: {"token":"a"}
+
+data: {"token":"white"}
+
+data: {"token":"shirt"}
+
+data: {"token":"("}
+
+data: {"token":"9"}
+
+data: {"token":"5"}
+
+data: {"token":"%"}
+
+data: {"token":"confidence"}
+
+data: {"token":"),"}
+
+data: {"token":"a"}
+
+data: {"token":"polo"}
+
+data: {"token":"logo"}
+
+data: {"token":"("}
+
+data: {"token":"7"}
+
+data: {"token":"5"}
+
+data: {"token":"%"}
+
+data: {"token":"confidence"}
+
+data: {"token":"),"}
+
+data: {"token":"and"}
+
+data: {"token":"a"}
+
+data: {"token":"white"}
+
+data: {"token":"wall"}
+
+data: {"token":"("}
+
+data: {"token":"7"}
+
+data: {"token":"0"}
+
+data: {"token":"%"}
+
+data: {"token":"confidence"}
+
+data: {"token":")."}
+
+data: {"token":"No"}
+
+data: {"token":"paper"}
+
+data: {"token":"text"}
+
+data: {"token":"exists"}
+
+data: {"token":"in"}
+
+data: {"token":"this"}
+
+data: {"token":"view"}
+
+data: {"token":"."}
+
+event: routing
+data: {"requestId":"e6521677-216e-4a27-ba90-f176ebbe97bc","requestType":"ocr","cacheHit":false,"cacheAgeMs":null,"gemmaInvoked":true,"qwenInvoked":true,"totalLatencyMs":136190}
+
+data: {"done":true}
+
+

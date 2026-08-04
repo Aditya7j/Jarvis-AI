@@ -131,6 +131,13 @@ export function VoiceInterface() {
       const trimmed = text.trim();
       if (!trimmed || processingRef.current) return;
 
+      if (tts.isSpeaking) {
+        console.info("[VOICE] New message while speaking — interrupting");
+        abortRef.current?.abort();
+        tts.stop();
+        resetStream();
+      }
+
       processingRef.current = true;
       setIsProcessing(true);
       resetStream();
@@ -242,6 +249,18 @@ export function VoiceInterface() {
 
   const isSpeaking = state === "speaking";
 
+  const statusLine = (() => {
+    const caps = conversationManager.capabilities;
+    const reasoning = caps?.reasoning;
+    if (reasoning?.provider === "ollama") {
+      return `Qwen3 ${reasoning.model ?? ""} via Ollama. Say &quot;Hey Jarvis&quot; or type a message.`;
+    }
+    if (reasoning?.provider) {
+      return `Reasoning via ${reasoning.provider} (${reasoning.model ?? ""}). Say &quot;Hey Jarvis&quot; or type a message.`;
+    }
+    return "No AI provider connected. Add a Gemini API key in Settings or start Ollama.";
+  })();
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex-1 overflow-y-auto p-4 space-y-4" ref={containerRef}>
@@ -252,14 +271,7 @@ export function VoiceInterface() {
             </div>
             <p className="text-white/30 text-sm">JARVIS is ready</p>
             <p className="text-white/15 text-xs mt-2 max-w-xs leading-relaxed">
-              {conversationManager.provider === "gemini"
-                ? "Connected to Gemini. Say &quot;Hey Jarvis&quot; or type a message to start."
-                : conversationManager.provider === "ollama"
-                ? "Connected to local Ollama. Say &quot;Hey Jarvis&quot; or type a message."
-                : conversationManager.provider === "openai" ||
-                  conversationManager.provider === "anthropic"
-                ? "Connected to a cloud provider. Say &quot;Hey Jarvis&quot; or type a message."
-                : "No AI provider connected. Add a Gemini API key in Settings or start Ollama."}
+              {statusLine}
             </p>
           </div>
         ) : (
