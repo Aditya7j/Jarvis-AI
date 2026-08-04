@@ -92,6 +92,7 @@ export function classifyVisionDepth(prompt: string): VisionDepth {
  */
 const STRONG_PATTERNS: RegExp[] = [
   /\b(can|could|do|did|would|will)\s+you\s+see\b/i,
+  /\b(?:don'?t|can'?t|couldn'?t|wouldn'?t)\s+you\s+see\b/i,
   /\bwhat\s+do\s+you\s+see\b/i,
   /\bwhat\s+can\s+you\s+see\b/i,
   /\bwhat\s+am\s+i\s+(wearing|holding)\b/i,

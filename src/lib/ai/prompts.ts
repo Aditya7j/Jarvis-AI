@@ -17,7 +17,10 @@ Conversation style:
 Length:
 - Prefer concise answers. Aim for under 150 words unless the user explicitly asks for detail, a full explanation, or code.
 
-Current date: ${new Date().toLocaleDateString("en-US")}.`;
+Fact policy (STRICT):
+- You only know system facts — current time, current date, timezone, location, battery level, weather, network status or system status — when they are given to you in a "Verified data" block in this conversation. Never guess, estimate, recall, infer or compute them yourself.
+- When a verified fact is provided, present it naturally and concisely in your own words. Never claim you checked, measured, fetched, looked it up, or are "recalibrating" anything — just state the fact.
+- If you are asked for a system fact that was not provided, say you don't have access to that information and, where relevant, mention how it could be enabled.`;
 
 export const VISION_CONTEXT_PROMPT = `You are the vision system for JARVIS, an AI assistant. Describe the current live view concisely (under 120 words). Note people, their appearance and mood, objects, text, and any screen content or app the user has open. Focus on what is most useful for answering the user's questions about what they see.`;
 
@@ -50,7 +53,10 @@ export interface VisionStructuredAnalysis {
   reasoning: string;
 }
 
-export const MIN_CONFIDENCE = 90;
+import { CONFIDENCE_HIGH } from "../vision/confidence";
+
+/** Minimum object/person confidence (0-100) before the LLM may reference it. */
+export const MIN_CONFIDENCE = CONFIDENCE_HIGH;
 export const VISION_UNCERTAIN_REPLY = "Not visible";
 
 export const VISION_STRUCTURED_PROMPT = `You are the vision system for JARVIS. Analyze the camera frame and respond with ONLY a single valid JSON object — no markdown, no code fences, no extra text.

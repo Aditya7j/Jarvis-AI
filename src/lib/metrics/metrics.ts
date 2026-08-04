@@ -37,6 +37,9 @@ export interface ModelRequestMetric {
   durationMs: number;
   ttfbMs?: number | null;
   chars?: number | null;
+  /** Approximate output tokens. Estimated from chars (≈ chars/4) unless a
+   * provider exposes the real count via AttemptEnd.tokens. */
+  tokens?: number | null;
   status: MetricStatus;
   errorCode?: string | null;
   message?: string | null;
@@ -57,9 +60,16 @@ export interface AttemptEnd {
   durationMs: number;
   ttfbMs?: number | null;
   chars?: number | null;
+  tokens?: number | null;
   errorCode?: string | null;
   message?: string | null;
   stages?: MetricStages | null;
+}
+
+export interface SystemMetricsSnapshot {
+  /** Live RSS of the Node.js server process (bytes). */
+  rssBytes: number | null;
+  heapUsedBytes: number | null;
 }
 
 export interface ModelAggregate {
@@ -87,6 +97,7 @@ export interface MetricsSnapshot {
   byProvider: Record<string, ModelAggregate>;
   recent: ModelRequestMetric[];
   insights: MetricsInsight[];
+  system: SystemMetricsSnapshot;
 }
 
 interface MetricsStore {
@@ -156,6 +167,9 @@ export function attemptEnded(input: AttemptEnd): void {
   const metric: ModelRequestMetric = {
     ...running,
     ...input,
+    tokens:
+      input.tokens ??
+      (typeof input.chars === "number" ? Math.round(input.chars / 4) : null),
     stages: input.stages ?? running.stages ?? null,
   };
   store.recent.push(metric);
@@ -283,6 +297,14 @@ function buildInsights(
   return insights;
 }
 
+function getSystemMetrics(): SystemMetricsSnapshot {
+  if (typeof process === "undefined" || !process.memoryUsage) {
+    return { rssBytes: null, heapUsedBytes: null };
+  }
+  const usage = process.memoryUsage();
+  return { rssBytes: usage.rss, heapUsedBytes: usage.heapUsed };
+}
+
 export function getMetricsSnapshot(): MetricsSnapshot {
   const store = getStore();
   const cutoff = Date.now() - SUMMARY_WINDOW_MS;
@@ -305,5 +327,6 @@ export function getMetricsSnapshot(): MetricsSnapshot {
     byProvider,
     recent: recentEvents,
     insights: buildInsights(windowed, byModel),
+    system: getSystemMetrics(),
   };
 }

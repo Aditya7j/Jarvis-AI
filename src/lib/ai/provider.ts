@@ -9,6 +9,7 @@ import {
   type MetricKind,
 } from "../metrics/metrics";
 import { appendMemoryContext, memoryService } from "../memory";
+import { trimContextWindow } from "./context-window";
 import { DEFAULT_SYSTEM_PROMPT } from "./prompts";
 import { clearRuntimeKey, getRuntimeKey, setRuntimeKey } from "./registry";
 import {
@@ -34,6 +35,7 @@ import type {
   VisionChatRequest,
   VisionRequest,
 } from "./types";
+import type { MetricStages } from "../metrics/metrics";
 
 export const PROVIDER_PRIORITY: ProviderName[] = [
   "gemini",
@@ -69,8 +71,10 @@ export class AIProviderService {
     extra?: {
       ttfbMs?: number | null;
       chars?: number | null;
+      tokens?: number | null;
       errorCode?: string | null;
       message?: string | null;
+      stages?: MetricStages | null;
     }
   ): void {
     attemptEnded({
@@ -79,8 +83,10 @@ export class AIProviderService {
       durationMs: Date.now() - startedAt,
       ttfbMs: extra?.ttfbMs ?? null,
       chars: extra?.chars ?? null,
+      tokens: extra?.tokens ?? null,
       errorCode: extra?.errorCode ?? null,
       message: extra?.message ?? null,
+      stages: extra?.stages ?? null,
     });
   }
 
@@ -256,14 +262,15 @@ export class AIProviderService {
   }
 
   private withSystemContext(options: GenerateTextOptions): GenerateTextOptions {
-    if (options.messages.some((m) => m.role === "system")) return options;
-    return {
-      ...options,
-      messages: [
-        { role: "system", content: DEFAULT_SYSTEM_PROMPT },
-        ...options.messages,
-      ],
-    };
+    const messages: AIMessageInput[] = options.messages.some(
+      (m) => m.role === "system"
+    )
+      ? options.messages
+      : [
+          { role: "system", content: DEFAULT_SYSTEM_PROMPT },
+          ...options.messages,
+        ];
+    return { ...options, messages: trimContextWindow(messages) };
   }
 
   private async withMemoryContext<T extends { messages?: AIMessageInput[] }>(
@@ -477,6 +484,10 @@ export class AIProviderService {
       this.markSuccess("ollama");
       this.endAttempt(attempt.id, attempt.startedAt, "ok", {
         chars: text.length,
+        stages: {
+          frameBytes: Math.round(request.imageBase64.length * 0.75),
+          llmMs: Date.now() - attempt.startedAt,
+        },
       });
       this.log.info("Gemma 3 frame analysis finished", {
         requestId,

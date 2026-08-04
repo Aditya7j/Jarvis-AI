@@ -4,7 +4,7 @@ import {
   type VisionAnalysisSummary,
 } from "@/lib/ai/prompts";
 import type { VisionDepth } from "@/lib/ai/vision-intent";
-import { liveVisionEngine } from "./live-vision-engine";
+import { liveFrameKey, liveVisionEngine } from "./live-vision-engine";
 import { answerFromVisionCache } from "./vision-answer";
 import { getVisionStateStore } from "./vision-state";
 
@@ -29,9 +29,7 @@ import { getVisionStateStore } from "./vision-state";
 
 /** Maximum Scene Cache age (ms) for a direct cache answer. */
 export const VISION_CACHE_FRESH_MS = 300;
-/** Confidence bands (0-100). Above HIGH -> answer directly; 50-80 -> uncertain; below LOW -> ask to reposition. */
-export const CONFIDENCE_HIGH = 80;
-export const CONFIDENCE_LOW = 50;
+export { CONFIDENCE_HIGH, CONFIDENCE_LOW } from "./confidence";
 
 export const NO_CAMERA_TEXT =
   "I can't see your camera feed — no camera or screen source is connected. Turn one on and ask me again.";
@@ -160,17 +158,26 @@ export async function resolveVisualQuestion(
   }
 
   // Simple questions: refresh the Scene Cache from the newest client frame so a
-  // fresh, confident cache can answer directly without any LLM.
+  // fresh, confident cache can answer directly without any LLM. Frames that
+  // were already analyzed (same capturedAt + size) are skipped, so repeated
+  // questions never pay for a redundant YOLO pass.
   let age = cacheAgeMs();
   if (depth === "simple" && frames.length > 0) {
-    await liveVisionEngine.analyzeFrame({
-      image: frames[0].image,
-      mimeType: frames[0].mimeType,
-      source: frames[0].source,
-      width: frames[0].width,
-      height: frames[0].height,
-      capturedAt: frames[0].capturedAt,
+    const frame = frames[0];
+    const key = liveFrameKey({
+      image: frame.image,
+      capturedAt: frame.capturedAt,
     });
+    if (!liveVisionEngine.hasProcessedFrame(key)) {
+      await liveVisionEngine.analyzeFrame({
+        image: frame.image,
+        mimeType: frame.mimeType,
+        source: frame.source,
+        width: frame.width,
+        height: frame.height,
+        capturedAt: frame.capturedAt,
+      });
+    }
     age = cacheAgeMs();
   }
 

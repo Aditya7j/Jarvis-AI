@@ -2,10 +2,17 @@ import type { AIMessage } from "@/types";
 import type { HealthSummary, ProviderName } from "./types";
 import type { RouterCapabilities } from "./router";
 import type { VisionAnalysisSummary } from "./prompts";
-import type { VisionFrame } from "@/lib/vision/vision-service";
 import { visionService } from "@/lib/vision/vision-service";
 import { useVisionStore } from "@/stores/vision-store";
 import { classifyVisionDepth, classifyVisionIntent } from "./vision-intent";
+import { classifyToolIntent } from "./intent-router";
+import { getSystemClock } from "./system-tools";
+import type {
+  BatteryResult,
+  GeolocationResult,
+  SystemClockFact,
+} from "./system-tools";
+import { getBatteryInfo, requestGeolocation } from "./browser-tools";
 
 type ErrorPayload = {
   code?: string;
@@ -150,6 +157,11 @@ export class AIClient {
           capturedAt?: number;
         }>;
       };
+      tools?: {
+        systemClock?: SystemClockFact;
+        geolocation?: GeolocationResult;
+        battery?: BatteryResult;
+      };
     } = {
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
       stream: true,
@@ -159,6 +171,22 @@ export class AIClient {
     const activeSource = visionService.getActiveSource();
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     const prompt = lastUser?.content ?? "";
+    const toolIntent = classifyToolIntent(prompt);
+    // Browser-only system tools run here, BEFORE the LLM, so their verified
+    // output travels with the request and the server never has to guess.
+    const toolsBody: NonNullable<typeof body.tools> = {};
+    if (toolIntent === "system-clock") {
+      toolsBody.systemClock = getSystemClock();
+    }
+    if (toolIntent === "battery") {
+      toolsBody.battery = await getBatteryInfo();
+    }
+    if (toolIntent === "geolocation" || toolIntent === "weather") {
+      toolsBody.geolocation = await requestGeolocation();
+    }
+    if (Object.keys(toolsBody).length > 0) {
+      body.tools = toolsBody;
+    }
     const needsVision = classifyVisionIntent(prompt);
     const visionDepth = needsVision ? classifyVisionDepth(prompt) : null;
     if (needsVision && activeSource && visionDepth === "simple") {
@@ -178,44 +206,28 @@ export class AIClient {
         `✓ Answered from live vision result (no new capture — conf ${live?.summary?.confidence ?? "-"}%, ${live?.objects?.length ?? 0} object(s), ${live?.newObjects?.length ?? 0} new)`
       );
     } else if (needsVision && activeSource) {
+      // A single fresh, high-resolution analysis frame is the best input for
+      // Gemma: it is current, sharp and captures the moment of the question.
+      // Uploading several live frames tripled the payload while the server only
+      // ever used the newest one, so only this frame is sent.
       const fresh = await visionService.captureAnalysisFrame(activeSource);
-      const recent = visionService.getRecentFrames(activeSource, 3);
-      const seen = new Set<number>();
-      const frames: VisionFrame[] = [];
       if (fresh) {
-        frames.push(fresh);
-        seen.add(fresh.capturedAt);
-      }
-      for (const frame of recent) {
-        if (frames.length >= 3) break;
-        if (!seen.has(frame.capturedAt)) {
-          frames.push(frame);
-          seen.add(frame.capturedAt);
-        }
-      }
-      if (frames.length > 0) {
         body.vision = {
           state: "live",
-          frames: frames.map((frame) => ({
-            image: frame.dataUrl,
-            mimeType: frame.mimeType || "image/jpeg",
-            source: frame.source,
-            width: frame.width,
-            height: frame.height,
-            capturedAt: frame.capturedAt,
-          })),
+          frames: [
+            {
+              image: fresh.dataUrl,
+              mimeType: fresh.mimeType || "image/jpeg",
+              source: fresh.source,
+              width: fresh.width,
+              height: fresh.height,
+              capturedAt: fresh.capturedAt,
+            },
+          ],
         };
-        const totalBytes = frames.reduce(
-          (sum, frame) => sum + Math.round(frame.dataUrl.length * 0.75),
-          0
-        );
+        const bytes = Math.round(fresh.dataUrl.length * 0.75);
         console.info(
-          `✓ Camera frame captured (${frames.length} frame(s), ${frames[0].width}x${frames[0].height}, newest at ${new Date(
-            frames[0].capturedAt
-          ).toLocaleTimeString()})`
-        );
-        console.info(
-          `✓ Image encoded (${frames.length} frame(s), ${totalBytes} bytes total, JPEG base64)`
+          `✓ Camera frame captured (${fresh.width}x${fresh.height}, ${bytes} bytes, JPEG base64)`
         );
       } else {
         body.vision = { state: "no-frame", frames: [] };

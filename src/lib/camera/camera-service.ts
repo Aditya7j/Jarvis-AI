@@ -1,7 +1,10 @@
 import type { VisionImage } from "@/lib/ai/types";
 import { useVisionStore } from "@/stores/vision-store";
+import { reportClientStats } from "@/lib/metrics/client-stats";
 import type { CameraFrame, CameraSource, CameraStats, FrameListener } from "./types";
 import { applyEnhancements } from "./enhance";
+
+const STATS_REPORT_INTERVAL_MS = 500;
 
 const MAX_CAPTURE_DIMENSION = 640;
 const MAX_ANALYSIS_DIMENSION = 1920;
@@ -85,9 +88,10 @@ class CameraService {
   private history: Partial<Record<CameraSource, CameraFrame[]>> = {};
   private frameListeners = new Set<FrameListener>();
   private stats: Record<CameraSource, CameraStats> = {
-    webcam: { mode: "main", fps: 0, frames: 0, active: false, lastCaptureAt: 0 },
-    screen: { mode: "main", fps: 0, frames: 0, active: false, lastCaptureAt: 0 },
+    webcam: { mode: "main", fps: 0, frames: 0, active: false, lastCaptureAt: 0, latestBytes: 0 },
+    screen: { mode: "main", fps: 0, frames: 0, active: false, lastCaptureAt: 0, latestBytes: 0 },
   };
+  private lastStatsReportAt = 0;
   private lastCaptureAt: Record<CameraSource, number> = { webcam: 0, screen: 0 };
   private frameTimes: Partial<Record<CameraSource, number>> = {};
   private encodingInFlight: Record<CameraSource, boolean> = { webcam: false, screen: false };
@@ -443,6 +447,7 @@ class CameraService {
     stat.active = true;
     stat.frames += 1;
     stat.lastCaptureAt = Date.now();
+    stat.latestBytes = Math.round(frame.dataUrl.length * 0.75);
     const now = performance.now();
     const previous = this.frameTimes[source];
     if (previous !== undefined) {
@@ -453,6 +458,10 @@ class CameraService {
       }
     }
     this.frameTimes[source] = now;
+    if (now - this.lastStatsReportAt >= STATS_REPORT_INTERVAL_MS) {
+      this.lastStatsReportAt = now;
+      reportClientStats({ fps: stat.fps, frameBytes: stat.latestBytes });
+    }
     for (const listener of this.frameListeners) {
       try {
         listener(frame);

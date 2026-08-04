@@ -159,6 +159,10 @@ interface LiveEngineStore {
   modelReady: boolean;
   lastError: string | null;
   lastTimeline: PipelineTimeline | null;
+  /** Per-trackingId vote counts per colour name, for temporal smoothing. */
+  colorVotes: Map<number, Map<string, number>>;
+  /** Per-trackingId last established (stabilized) colour. */
+  colorCache: Map<number, NamedColor>;
 }
 
 const STORE_KEY = "__jarvis_live_vision_engine__";
@@ -197,6 +201,8 @@ function getStore(): LiveEngineStore {
     modelReady: false,
     lastError: null,
     lastTimeline: null,
+    colorVotes: new Map(),
+    colorCache: new Map(),
   };
   Object.defineProperty(g, STORE_KEY, {
     value: store,
@@ -207,10 +213,21 @@ function getStore(): LiveEngineStore {
   return store;
 }
 
-function frameKey(frame: LiveFrameInput): string {
+/**
+ * Stable identity for a frame. Two frames with the same capturedAt and encoded
+ * size are treated as the same frame so the YOLO pipeline can skip re-analysis.
+ */
+export function liveFrameKey(frame: {
+  capturedAt?: number;
+  image: string;
+}): string {
   return frame.capturedAt
     ? `t:${frame.capturedAt}:${frame.image.length}`
     : `i:${frame.image.length}:${frame.image.slice(0, 64)}`;
+}
+
+function frameKey(frame: LiveFrameInput): string {
+  return liveFrameKey(frame);
 }
 
 function toDataUrl(image: string, mimeType?: string): string {
@@ -256,6 +273,76 @@ function buildSceneSummary(
   }
   if (parts.length === 0) return "Nothing clearly visible.";
   return `I can see ${parts.join(", ")}.`;
+}
+
+function decayVotes(votes: Map<string, number>): void {
+  for (const [name, count] of votes) {
+    const decayed = count * 0.5;
+    if (decayed < 0.5) votes.delete(name);
+    else votes.set(name, decayed);
+  }
+}
+
+/**
+ * Temporal colour smoothing keyed by tracker identity. A colour is only
+ * "established" once it has accumulated >= 2 votes while holding >= 50% of the
+ * window, which removes single-frame HSV flicker. Once established it is kept
+ * in `cache` and survives occasional null/bad samples; a persistent change in
+ * hue decays the old name and lets the new one win within a few frames.
+ */
+function stabilizeColor(
+  trackingId: number,
+  sampled: NamedColor | null,
+  votes: Map<number, Map<string, number>>,
+  cache: Map<number, NamedColor>,
+): NamedColor | null {
+  const bucket = votes.get(trackingId) ?? new Map<string, number>();
+  if (sampled) {
+    bucket.set(sampled.name, (bucket.get(sampled.name) ?? 0) + 1);
+    for (const [name, count] of bucket) {
+      if (name !== sampled.name) bucket.set(name, count * 0.6);
+    }
+  } else {
+    decayVotes(bucket);
+  }
+  if (bucket.size === 0) {
+    votes.delete(trackingId);
+    cache.delete(trackingId);
+    return null;
+  }
+
+  let best = "";
+  let bestCount = 0;
+  let total = 0;
+  for (const [name, count] of bucket) {
+    total += count;
+    if (count > bestCount) {
+      bestCount = count;
+      best = name;
+    }
+  }
+  votes.set(trackingId, bucket);
+
+  const established = bestCount >= 2 && bestCount >= total * 0.5;
+  if (established) {
+    const resolved = sampled && sampled.name === best ? sampled : cache.get(trackingId);
+    if (resolved) cache.set(trackingId, resolved);
+    return resolved ?? null;
+  }
+  return cache.get(trackingId) ?? null;
+}
+
+/** Prune colour history for tracking ids that are no longer present. */
+function pruneColors(
+  store: LiveEngineStore,
+  trackedIds: Set<number>,
+): void {
+  for (const id of [...store.colorVotes.keys()]) {
+    if (!trackedIds.has(id)) {
+      store.colorVotes.delete(id);
+      store.colorCache.delete(id);
+    }
+  }
 }
 
 async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
@@ -358,7 +445,8 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
     .sort((a, b) => b.confidence - a.confidence);
 
   // --- Tracking ---
-  const tracked = getStore().tracker.update(main.detections, Date.now());
+  const store = getStore();
+  const tracked = store.tracker.update(main.detections, Date.now());
 
   const sceneObjects: SceneObject[] = [];
   const scenePeople: ScenePerson[] = [];
@@ -369,13 +457,19 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
     if (track.label === "person") {
       const person: ScenePerson = { ...track };
       if (track.box.height >= MIN_PERSON_HEIGHT_FOR_COLOR) {
-        const shirt = sampleRegion(
+        const sampled = sampleRegion(
           { data: rgb, width, height },
           track.box,
           0.25,
           0.28,
           0.75,
           0.6,
+        );
+        const shirt = stabilizeColor(
+          track.trackingId,
+          sampled,
+          store.colorVotes,
+          store.colorCache,
         );
         if (shirt) {
           person.shirtColor = shirt;
@@ -387,7 +481,13 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
     } else {
       const object: SceneObject = { ...track };
       if (track.box.width * track.box.height >= 800) {
-        const color = sampleBoxColor({ data: rgb, width, height }, track.box);
+        const sampled = sampleBoxColor({ data: rgb, width, height }, track.box);
+        const color = stabilizeColor(
+          track.trackingId,
+          sampled,
+          store.colorVotes,
+          store.colorCache,
+        );
         if (color) {
           object.color = color;
           colors[`object-${track.trackingId}`] = color;
@@ -396,6 +496,7 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
       sceneObjects.push(object);
     }
   }
+  pruneColors(store, new Set(tracked.map((track) => track.trackingId)));
   timeline.colorMs = performance.now() - tColor;
 
   // --- Held object resolution (ROI wins, then near-person small objects) ---
@@ -442,7 +543,6 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
 
   // --- Scene summary + vision state write ---
   const scene = buildSceneSummary(scenePeople, sceneObjects, heldObject);
-  const store = getStore();
   const visionFrame: VisionFrame = {
     buffer: toDataUrl(frame.image, frame.mimeType),
     width,
@@ -632,6 +732,8 @@ export const liveVisionEngine = {
     store.tracker.reset();
     store.recentInferenceMs = [];
     store.recentPipelineMs = [];
+    store.colorVotes.clear();
+    store.colorCache.clear();
     log.info("Live vision session stopped");
   },
 
@@ -656,7 +758,11 @@ export const liveVisionEngine = {
    */
   async analyzeFrame(frame: LiveFrameInput): Promise<LiveVisionResult | null> {
     const store = getStore();
+    const key = frameKey(frame);
     const outcome = await withPipeline(() => runPipeline(frame));
+    if (outcome.ok) {
+      store.lastProcessedKey = key;
+    }
     if (!outcome.ok) {
       const message = outcome.result?.error ?? "Vision pipeline failed";
       store.errors += 1;
@@ -682,6 +788,12 @@ export const liveVisionEngine = {
       };
     }
     return outcome.result;
+  },
+
+  /** True when the exact frame (capturedAt + size) was already analyzed. */
+  hasProcessedFrame(key: string): boolean {
+    const store = getStore();
+    return store.active && store.lastProcessedKey === key;
   },
 
   /** Latest completed result, if any. */

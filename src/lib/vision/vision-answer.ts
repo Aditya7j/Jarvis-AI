@@ -1,3 +1,4 @@
+import { confidenceBand } from "./confidence";
 import type { VisionStateSnapshot } from "./vision-state";
 import { getVisionStateStore } from "./vision-state";
 
@@ -24,18 +25,16 @@ export interface SimpleVisionAnswer {
 
 const FLAG_HIGH_CONFIDENCE = 0.7;
 
-/** Confidence bands (0-100). >= HIGH answer directly; 50-80 uncertain; <50 ask to reposition. */
-const CONFIDENCE_HIGH = 80;
-const CONFIDENCE_LOW = 50;
-
 /**
- * Apply the confidence-band contract to a positive detection answer:
- *   >= 80 -> answer directly
- *   50-79 -> answer with uncertainty
- *   < 50  -> never guess, ask the user to reposition
+ * Apply the shared confidence-band contract to a positive detection answer
+ * (see ./confidence.ts):
+ *   >= 80       -> answer directly
+ *   70-79       -> answer with uncertainty
+ *   < 70        -> never guess, ask the user to reposition
  */
 function finalize(text: string, confidence: number): SimpleVisionAnswer {
-  if (confidence < CONFIDENCE_LOW) {
+  const band = confidenceBand(confidence);
+  if (band === "low") {
     return {
       text: "I can't see that clearly enough to answer — could you move into view or reposition the camera?",
       confidence,
@@ -43,7 +42,7 @@ function finalize(text: string, confidence: number): SimpleVisionAnswer {
       fromCache: true,
     };
   }
-  if (confidence < CONFIDENCE_HIGH) {
+  if (band === "uncertain") {
     return {
       text: `${text} — I'm not completely sure, it isn't fully clear.`,
       confidence,

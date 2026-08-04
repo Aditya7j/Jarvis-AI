@@ -27,12 +27,20 @@ export interface MemoryServiceOptions {
   repository: MemoryRepository;
 }
 
+const CONTEXT_CACHE_TTL_MS = 10_000;
+
 export class MemoryService {
   private readonly repository: MemoryRepository;
   private readonly log = aiLogger.child("memory");
+  private contextCache: { context: string | null; at: number } | null = null;
 
   constructor(options: MemoryServiceOptions) {
     this.repository = options.repository;
+  }
+
+  /** Drop the cached owner context so the next buildContext re-reads disk. */
+  invalidateContextCache(): void {
+    this.contextCache = null;
   }
 
   async getProfile(): Promise<OwnerProfile> {
@@ -48,6 +56,7 @@ export class MemoryService {
       updatedAt: Date.now(),
     };
     await this.repository.saveProfile(updated);
+    this.invalidateContextCache();
     this.log.info("Owner profile updated");
     return updated;
   }
@@ -99,6 +108,7 @@ export class MemoryService {
       reviewedAt: null,
     };
     await this.repository.addEntry(entry);
+    this.invalidateContextCache();
     this.log.info("Memory entry created", {
       id: entry.id,
       source: entry.source,
@@ -123,6 +133,7 @@ export class MemoryService {
       updatedAt: Date.now(),
     };
     await this.repository.updateEntry(updated);
+    this.invalidateContextCache();
     this.log.info("Memory entry updated", { id });
     return updated;
   }
@@ -143,6 +154,7 @@ export class MemoryService {
         status === "pending" ? existing.reviewedAt : Date.now(),
     };
     await this.repository.updateEntry(updated);
+    this.invalidateContextCache();
     this.log.info("Memory entry reviewed", { id, status });
     return updated;
   }
@@ -152,12 +164,14 @@ export class MemoryService {
     const exists = entries.some((entry) => entry.id === id);
     if (!exists) return false;
     await this.repository.deleteEntry(id);
+    this.invalidateContextCache();
     this.log.info("Memory entry deleted", { id });
     return true;
   }
 
   async clearAll(): Promise<void> {
     await this.repository.clearEntries();
+    this.invalidateContextCache();
     this.log.warn("All memories cleared");
   }
 
@@ -174,6 +188,7 @@ export class MemoryService {
       ...sanitizePrivacyPatch(patch as unknown as Record<string, unknown>),
     };
     await this.repository.savePrivacy(updated);
+    this.invalidateContextCache();
     this.log.info("Memory privacy updated", { ...updated });
     return updated;
   }
@@ -204,6 +219,15 @@ export class MemoryService {
   }
 
   async buildContext(): Promise<string | null> {
+    // buildContext() is called on every chat / vision request. Profile and
+    // memory entries are read from disk each time, which is wasteful; cache the
+    // assembled context for CONTEXT_CACHE_TTL_MS and invalidate on any write.
+    if (
+      this.contextCache &&
+      Date.now() - this.contextCache.at < CONTEXT_CACHE_TTL_MS
+    ) {
+      return this.contextCache.context;
+    }
     const privacy = await this.repository.getPrivacy();
     if (!privacy.enabled || !privacy.contextInjection) return null;
     const [profile, entries] = await Promise.all([
@@ -211,7 +235,9 @@ export class MemoryService {
       this.repository.listEntries(),
     ]);
     const context = buildOwnerContext(profile, entries);
-    return context.length > 0 ? context : null;
+    const result = context.length > 0 ? context : null;
+    this.contextCache = { context: result, at: Date.now() };
+    return result;
   }
 
   async getSnapshot(): Promise<MemorySnapshot> {

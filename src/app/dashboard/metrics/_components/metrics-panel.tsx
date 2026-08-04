@@ -3,6 +3,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Radio, BarChart3 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  getClientStats,
+  subscribeClientStats,
+} from "@/lib/metrics/client-stats";
 import type {
   MetricsInsight,
   MetricsSnapshot,
@@ -51,6 +55,12 @@ function formatCount(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
 }
 
+function formatBytes(bytes: number | null | undefined): string {
+  if (!bytes) return "—";
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.round(bytes / 1024)} KB`;
+}
+
 function Card({
   label,
   value,
@@ -76,7 +86,12 @@ export function MetricsPanel() {
   const [snapshot, setSnapshot] = useState<MetricsSnapshot | null>(null);
   const [events, setEvents] = useState<ModelRequestMetric[]>([]);
   const [hideHealth, setHideHealth] = useState(false);
+  const [clientStats, setClientStats] = useState(() => getClientStats());
   const eventsRef = useRef(new Map<string, ModelRequestMetric>());
+
+  useEffect(() => {
+    return subscribeClientStats(() => setClientStats(getClientStats()));
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -156,6 +171,7 @@ export function MetricsPanel() {
     (e) => e.status === "error" || e.status === "timeout"
   ).length;
   const runningCount = visible.filter((e) => e.status === "running").length;
+  const totalTokens = ended.reduce((sum, e) => sum + (e.tokens ?? 0), 0);
 
   const byModelRows = useMemo(() => {
     if (!snapshot) return [];
@@ -182,6 +198,25 @@ export function MetricsPanel() {
         />
         <Card label="Avg latency" value={formatCount(avgLatency)} accent="text-green-400" />
         <Card label="Errors + timeouts" value={String(failed)} accent={failed ? "text-red-400" : "text-white"} />
+        <Card label="Output tokens (30m)" value={totalTokens.toLocaleString()} accent="text-purple-400" />
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Card
+          label="Server RSS memory"
+          value={formatBytes(snapshot?.system.rssBytes)}
+          accent="text-cyan-400"
+        />
+        <Card
+          label="Live camera YOLO FPS"
+          value={clientStats.fps > 0 ? clientStats.fps.toFixed(1) : "—"}
+          accent="text-green-400"
+        />
+        <Card
+          label="Last client frame"
+          value={formatBytes(clientStats.frameBytes)}
+          accent="text-blue-400"
+        />
       </div>
 
       <section className="rounded-xl border border-white/[0.05] bg-white/[0.02] p-4">
@@ -355,7 +390,7 @@ export function MetricsPanel() {
                   <td className="py-2 text-white/40 max-w-[220px] truncate">
                     {metric.status === "ok"
                       ? metric.chars !== null && metric.chars !== undefined
-                        ? `${metric.chars} chars`
+                        ? `${metric.chars} chars · ~${metric.tokens ?? 0} tok${metric.stages?.frameBytes ? ` · ${formatBytes(metric.stages.frameBytes)} frame` : ""}`
                         : "—"
                       : metric.errorCode
                         ? `${metric.errorCode}${metric.message ? ` — ${metric.message}` : ""}`

@@ -15,6 +15,8 @@ export interface CameraStats {
   frames: number;
   active: boolean;
   lastCaptureAt: number;
+  /** Encoded size of the most recent captured frame (bytes). */
+  latestBytes: number;
 }
 
 export type FrameListener = (frame: CameraFrame) => void;

@@ -13,11 +13,29 @@ import type {
   VisionAnalysisSummary,
   VisionStructuredAnalysis,
 } from "@/lib/ai/prompts";
-import { classifyVisionDepth, classifyVisionIntent } from "@/lib/ai/vision-intent";
+import { classifyVisionDepth } from "@/lib/ai/vision-intent";
+import {
+  BATTERY_DENIED_REPLY,
+  GEOLOCATION_DENIED_REPLY,
+  WEATHER_FAILED_REPLY,
+  WEATHER_NO_LOCATION_REPLY,
+  buildVerifiedFactContext,
+  classifyToolIntent,
+  toolLabelFor,
+  type ToolIntent,
+} from "@/lib/ai/intent-router";
+import {
+  getSystemClock,
+  getWeather,
+  type BatteryResult,
+  type GeolocationResult,
+  type SystemClockFact,
+} from "@/lib/ai/system-tools";
 import { visionCache } from "@/lib/vision/vision-cache";
 import {
   LIVE_VISION_STALE_MS,
 } from "@/lib/vision/live-vision-engine";
+import { CONFIDENCE_MID } from "@/lib/vision/confidence";
 import {
   resolveVisualQuestion,
   type VisionRoutingMeta,
@@ -48,6 +66,11 @@ interface ChatRequestBody {
   model?: string;
   stream?: boolean;
   vision?: { state?: VisionState; image?: string; mimeType?: string; frames?: VisionFrameBody[] };
+  tools?: {
+    systemClock?: SystemClockFact;
+    geolocation?: GeolocationResult;
+    battery?: BatteryResult;
+  };
 }
 
 interface NormalizedFrame {
@@ -75,6 +98,17 @@ interface RoutingTelemetry {
   totalLatencyMs: number;
 }
 
+interface ToolRouting {
+  intent: ToolIntent;
+  tool: string;
+  latencyMs: number;
+  fallbackReason: string | null;
+}
+
+type ToolPlan =
+  | { kind: "direct"; text: string; routing: ToolRouting }
+  | { kind: "naturalize"; systemContext: string; routing: ToolRouting };
+
 type VisualRoute =
   | {
       kind: "direct";
@@ -88,7 +122,8 @@ type ChatStreamEvent =
   | { kind: "token"; text: string }
   | { kind: "status"; phase: string }
   | { kind: "vision"; summary: VisionAnalysisSummary }
-  | { kind: "routing"; routing: RoutingTelemetry };
+  | { kind: "routing"; routing: RoutingTelemetry }
+  | { kind: "tool"; routing: ToolRouting };
 
 /**
  * Cancels the in-flight Gemma 3 inference of a previous request when a new
@@ -136,7 +171,11 @@ function normalizeFrames(
       frames.push({ image, mimeType: vision.mimeType || "image/jpeg" });
     }
   }
-  return frames;
+  // Order by descending encoded size: for a fixed resolution/quality the larger
+  // JPEG is the sharper, more detailed frame, so frames[0] (used for both the
+  // YOLO refresh and Gemma) is always the best candidate — never the newest
+  // merely because it is newest.
+  return frames.sort((a, b) => b.image.length - a.image.length);
 }
 
 function withDefaultSystem(messages: AIMessageInput[]): AIMessageInput[] {
@@ -144,7 +183,7 @@ function withDefaultSystem(messages: AIMessageInput[]): AIMessageInput[] {
   return [{ role: "system", content: DEFAULT_SYSTEM_PROMPT }, ...messages];
 }
 
-function injectVisionContext(
+function injectSystemBlock(
   messages: AIMessageInput[],
   systemBlock: string
 ): AIMessageInput[] {
@@ -167,7 +206,8 @@ function toSSE(
   stream: AsyncGenerator<ChatStreamEvent>,
   signal?: AbortSignal,
   requestId?: string,
-  onFinal?: (text: string) => void
+  onFinal?: (text: string) => void,
+  onCancel?: () => void
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const startedAt = Date.now();
@@ -208,6 +248,14 @@ function toSSE(
             controller.enqueue(
               encoder.encode(
                 `event: routing\ndata: ${JSON.stringify(event.routing)}\n\n`
+              )
+            );
+            continue;
+          }
+          if (event.kind === "tool") {
+            controller.enqueue(
+              encoder.encode(
+                `event: tool\ndata: ${JSON.stringify(event.routing)}\n\n`
               )
             );
             continue;
@@ -261,6 +309,9 @@ function toSSE(
         controller.close();
       }
     },
+    cancel() {
+      onCancel?.();
+    },
   });
 }
 
@@ -289,14 +340,21 @@ export async function POST(request: Request): Promise<Response> {
   const options = { messages, model: body.model };
   const log = aiLogger.child("chat");
   const requestId = crypto.randomUUID();
+  // Aborts in-flight LLM/Gemma work when the caller disconnects. request.signal
+  // does not reliably fire on client disconnect in Next.js route handlers, so
+  // the response stream's cancel() is also wired into this controller (see the
+  // toSSE onCancel hook below).
+  const requestAbort = new AbortController();
+  request.signal.addEventListener("abort", () => requestAbort.abort(), { once: true });
   const frames = normalizeFrames(body.vision);
   const visionState: VisionState =
     body.vision?.state === "live" || body.vision?.state === "no-frame"
       ? body.vision.state
       : "off";
   const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
-  const intent = classifyVisionIntent(lastUserMessage?.content ?? "");
-  const needsVision = intent === "vision";
+  const prompt = lastUserMessage?.content ?? "";
+  const toolIntent = classifyToolIntent(prompt);
+  const needsVision = toolIntent === "vision" || toolIntent === "ocr";
 
   log.info("Chat request started", {
     requestId,
@@ -305,7 +363,8 @@ export async function POST(request: Request): Promise<Response> {
     model: body.model ?? "auto",
     vision: visionState,
     frames: frames.length,
-    intent,
+    intent: toolIntent,
+    tool: toolLabelFor(toolIntent),
   });
 
   async function analyzeNewestFrame(
@@ -376,13 +435,34 @@ export async function POST(request: Request): Promise<Response> {
     }
   }
 
-  function cachedVisionPlan(source: NormalizedFrame["source"]): VisionPlan | null {
+  /**
+   * The cached analysis may only be reused when the frame it was built from is
+   * still the current one. If the request carries a NEWER frame (capturedAt
+   * ahead of the cached frame by more than the skew window) the scene may have
+   * changed, so the cache is skipped and the new frame is re-analyzed. This is
+   * what prevents "fresh frame capture, stale answer".
+   */
+  const VISION_CACHE_FRAME_SKEW_MS = 250;
+
+  function cachedVisionPlan(
+    source: NormalizedFrame["source"],
+    newest?: NormalizedFrame
+  ): VisionPlan | null {
     const cached = visionCache.get(source);
     if (!cached) return null;
     if (Date.now() - cached.capturedAt > LIVE_VISION_STALE_MS) {
       log.info("Vision cache entry is stale (frame older than 1s); re-analyzing", {
         requestId,
         ageMs: Date.now() - cached.capturedAt,
+      });
+      return null;
+    }
+    if (newest?.capturedAt && newest.capturedAt - cached.capturedAt > VISION_CACHE_FRAME_SKEW_MS) {
+      log.info("Vision cache entry is from an older frame; re-analyzing", {
+        requestId,
+        cachedAt: cached.capturedAt,
+        frameAt: newest.capturedAt,
+        skewMs: newest.capturedAt - cached.capturedAt,
       });
       return null;
     }
@@ -404,11 +484,11 @@ export async function POST(request: Request): Promise<Response> {
     const controller = new AbortController();
     activeVisionController = controller;
     const onAbort = () => controller.abort();
-    request.signal.addEventListener("abort", onAbort, { once: true });
+    requestAbort.signal.addEventListener("abort", onAbort, { once: true });
     return {
       signal: controller.signal,
       done: () => {
-        request.signal.removeEventListener("abort", onAbort);
+        requestAbort.signal.removeEventListener("abort", onAbort);
         if (activeVisionController === controller) {
           activeVisionController = null;
         }
@@ -459,6 +539,21 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   /**
+   * Enforce the <70% follow-up contract on Gemma-grounded answers: when the
+   * overall vision confidence is below CONFIDENCE_MID the LLM is instructed to
+   * hedge and invite repositioning instead of asserting details.
+   */
+  function withConfidenceHedge(plan: VisionPlan): VisionPlan {
+    const confidence = plan.summary?.confidence;
+    if (confidence === null || confidence === undefined || confidence >= CONFIDENCE_MID) {
+      return plan;
+    }
+    if (!plan.systemContext) return plan;
+    const hedge = `\n\nOverall vision confidence is low (${confidence}%, below ${CONFIDENCE_MID}%). If the user asked about anything currently visible, answer with a clear uncertainty hedge and invite them to reposition the camera or move closer — never assert visual details you are not sure about.`;
+    return { ...plan, systemContext: `${plan.systemContext}${hedge}` };
+  }
+
+  /**
    * Route one visual question through the Vision Manager — the single choke
    * point for every camera question. The manager decides cache/refusal vs
    * Gemma; Qwen only ever sees grounded vision facts, never the raw frame.
@@ -485,11 +580,11 @@ export async function POST(request: Request): Promise<Response> {
         };
       case "gemma": {
         const newest = resolution.frame;
-        const cached = cachedVisionPlan(newest.source);
+        const cached = cachedVisionPlan(newest.source, newest);
         if (cached) {
           return {
             kind: "llm",
-            plan: cached,
+            plan: withConfidenceHedge(cached),
             gemmaInvoked: false,
             meta: resolution.meta,
           };
@@ -497,7 +592,7 @@ export async function POST(request: Request): Promise<Response> {
         const plan = await analyzeAndCachePlan(newest);
         return {
           kind: "llm",
-          plan,
+          plan: withConfidenceHedge(plan),
           gemmaInvoked: true,
           meta: resolution.meta,
         };
@@ -510,7 +605,7 @@ export async function POST(request: Request): Promise<Response> {
   ): AsyncGenerator<ChatStreamEvent> {
     for await (const token of aiService.streamText({
       ...options,
-      signal: request.signal,
+      signal: requestAbort.signal,
       messages: withDefaultSystem(contextualMessages),
     })) {
       yield { kind: "token", text: token };
@@ -533,104 +628,258 @@ export async function POST(request: Request): Promise<Response> {
     };
   }
 
-  async function* createStream(): AsyncGenerator<ChatStreamEvent> {
-    if (!needsVision) {
-      yield { kind: "status", phase: "text" };
-      yield* streamQwen(messages);
-      return;
-    }
-    const prompt = lastUserMessage?.content ?? "";
-    const depth = classifyVisionDepth(prompt);
+  /**
+   * Route a non-vision, non-LLM request through its verified system tool. The
+   * tool output is the ONLY source of truth. `naturalize` answers still go
+   * through the LLM, but the verified fact is injected as immutable system
+   * context. `direct` answers (tool denied/unavailable) never touch the LLM.
+   */
+  async function resolveToolPlan(): Promise<ToolPlan> {
     const startedAt = Date.now();
-    const route = await routeVisual(prompt, depth);
-    if (route.kind === "direct") {
-      const telemetry = routingTelemetry(route.meta, false, startedAt);
-      log.info("[routing]", { ...telemetry });
-      if (route.summary) yield { kind: "vision", summary: route.summary };
-      yield { kind: "status", phase: "cached" };
-      yield { kind: "token", text: route.text };
-      yield { kind: "routing", routing: telemetry };
-      return;
-    }
-    const plan = route.plan;
-    if (plan.cancelled) {
-      yield { kind: "status", phase: "cancelled" };
-      const telemetry = routingTelemetry(route.meta, false, startedAt);
-      log.info("[routing]", { ...telemetry });
-      yield { kind: "routing", routing: telemetry };
-      return;
-    }
-    if (plan.summary) yield { kind: "vision", summary: plan.summary };
-    yield { kind: "status", phase: "answering" };
-    log.info("✓ Vision JSON passed to reasoning model", {
-      requestId,
-      state: visionState,
-      summary: plan.summary,
+    const intent = toolIntent;
+    const tool = toolLabelFor(intent);
+    const routing = (fallbackReason: string | null): ToolRouting => ({
+      intent,
+      tool,
+      latencyMs: Date.now() - startedAt,
+      fallbackReason,
     });
-    yield* streamQwen(
-      plan.systemContext
-        ? injectVisionContext(messages, plan.systemContext)
-        : messages
-    );
-    const telemetry = routingTelemetry(route.meta, true, startedAt);
-    log.info("[routing]", { ...telemetry });
-    yield { kind: "routing", routing: telemetry };
+    const clientTools = body.tools;
+    switch (intent) {
+      case "system-clock": {
+        const fact = clientTools?.systemClock ?? getSystemClock();
+        return {
+          kind: "naturalize",
+          routing: routing(null),
+          systemContext: buildVerifiedFactContext(
+            tool,
+            "the current time, date and timezone",
+            fact
+          ),
+        };
+      }
+      case "geolocation": {
+        const location = clientTools?.geolocation;
+        if (location?.granted) {
+          return {
+            kind: "naturalize",
+            routing: routing(null),
+            systemContext: buildVerifiedFactContext(
+              tool,
+              "your current location",
+              location
+            ),
+          };
+        }
+        return {
+          kind: "direct",
+          routing: routing(
+            location ? "geolocation_permission_denied" : "no_location_data"
+          ),
+          text: GEOLOCATION_DENIED_REPLY,
+        };
+      }
+      case "battery": {
+        const battery = clientTools?.battery;
+        if (battery?.granted) {
+          return {
+            kind: "naturalize",
+            routing: routing(null),
+            systemContext: buildVerifiedFactContext(
+              tool,
+              "your device's battery status",
+              battery
+            ),
+          };
+        }
+        return {
+          kind: "direct",
+          routing: routing(
+            battery ? "battery_unavailable" : "no_battery_data"
+          ),
+          text: BATTERY_DENIED_REPLY,
+        };
+      }
+      case "weather": {
+        const location = clientTools?.geolocation;
+        if (!location?.granted) {
+          return {
+            kind: "direct",
+            routing: routing(
+              location ? "geolocation_permission_denied" : "no_location_data"
+            ),
+            text: WEATHER_NO_LOCATION_REPLY,
+          };
+        }
+        try {
+          const weather = await getWeather(
+            location.latitude,
+            location.longitude
+          );
+          return {
+            kind: "naturalize",
+            routing: routing(null),
+            systemContext: buildVerifiedFactContext(
+              tool,
+              "the current weather",
+              weather
+            ),
+          };
+        } catch (error) {
+          log.warn("Weather API failed", {
+            requestId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return {
+            kind: "direct",
+            routing: routing("weather_api_failed"),
+            text: WEATHER_FAILED_REPLY,
+          };
+        }
+      }
+      default: {
+        // Vision/LLM intents are handled by the caller — never reached.
+        return {
+          kind: "direct",
+          routing: routing("unhandled_intent"),
+          text: "I can't answer that right now.",
+        };
+      }
+    }
+  }
+
+  async function* createStream(): AsyncGenerator<ChatStreamEvent> {
+    if (needsVision) {
+      const depth = classifyVisionDepth(prompt);
+      const startedAt = Date.now();
+      const route = await routeVisual(prompt, depth);
+      if (route.kind === "direct") {
+        const telemetry = routingTelemetry(route.meta, false, startedAt);
+        log.info("[routing]", { ...telemetry });
+        if (route.summary) yield { kind: "vision", summary: route.summary };
+        yield { kind: "status", phase: "cached" };
+        yield { kind: "token", text: route.text };
+        yield { kind: "routing", routing: telemetry };
+        return;
+      }
+      const plan = route.plan;
+      if (plan.cancelled) {
+        yield { kind: "status", phase: "cancelled" };
+        const telemetry = routingTelemetry(route.meta, false, startedAt);
+        log.info("[routing]", { ...telemetry });
+        yield { kind: "routing", routing: telemetry };
+        return;
+      }
+      if (plan.summary) yield { kind: "vision", summary: plan.summary };
+      yield { kind: "status", phase: "answering" };
+      log.info("✓ Vision JSON passed to reasoning model", {
+        requestId,
+        state: visionState,
+        summary: plan.summary,
+      });
+      yield* streamQwen(
+        plan.systemContext
+          ? injectSystemBlock(messages, plan.systemContext)
+          : messages
+      );
+      const telemetry = routingTelemetry(route.meta, true, startedAt);
+      log.info("[routing]", { ...telemetry });
+      yield { kind: "routing", routing: telemetry };
+      return;
+    }
+
+    if (toolIntent !== "llm") {
+      const plan = await resolveToolPlan();
+      log.info("[tool-routing]", { requestId, ...plan.routing });
+      yield { kind: "tool", routing: plan.routing };
+      if (plan.kind === "direct") {
+        yield { kind: "status", phase: "tool" };
+        yield { kind: "token", text: plan.text };
+        return;
+      }
+      yield { kind: "status", phase: "answering" };
+      yield* streamQwen(injectSystemBlock(messages, plan.systemContext));
+      return;
+    }
+
+    yield { kind: "status", phase: "text" };
+    yield* streamQwen(messages);
   }
 
   if (body.stream === false) {
     try {
       const startedAt = Date.now();
-      if (!needsVision) {
-        log.info("Text-only request — vision skipped", { requestId });
+      if (needsVision) {
+        const route = await routeVisual(prompt, classifyVisionDepth(prompt));
+        if (route.kind === "direct") {
+          const telemetry = routingTelemetry(route.meta, false, startedAt);
+          log.info("[routing]", { ...telemetry });
+          return Response.json({
+            text: route.text,
+            vision: route.summary,
+            cached: true,
+            routing: telemetry,
+          });
+        }
+        const plan = route.plan;
+        if (plan.cancelled) {
+          const telemetry = routingTelemetry(route.meta, false, startedAt);
+          log.info("[routing]", { ...telemetry });
+          return jsonError(new Error("Vision analysis cancelled."), 499);
+        }
+        const contextualMessages = plan.systemContext
+          ? injectSystemBlock(messages, plan.systemContext)
+          : messages;
+        if (plan.summary) {
+          log.info("✓ Vision JSON passed to reasoning model", {
+            requestId,
+            state: visionState,
+            summary: plan.summary,
+          });
+        }
         const text = await aiService.generateText({
           ...options,
-          signal: request.signal,
-          messages: withDefaultSystem(messages),
+          signal: requestAbort.signal,
+          messages: withDefaultSystem(contextualMessages),
         });
-        return Response.json({ text, vision: null });
-      }
-      const prompt = lastUserMessage?.content ?? "";
-      const route = await routeVisual(prompt, classifyVisionDepth(prompt));
-      if (route.kind === "direct") {
-        const telemetry = routingTelemetry(route.meta, false, startedAt);
+        const telemetry = routingTelemetry(route.meta, true, startedAt);
         log.info("[routing]", { ...telemetry });
-        return Response.json({
-          text: route.text,
-          vision: route.summary,
-          cached: true,
-          routing: telemetry,
-        });
-      }
-      const plan = route.plan;
-      if (plan.cancelled) {
-        const telemetry = routingTelemetry(route.meta, false, startedAt);
-        log.info("[routing]", { ...telemetry });
-        return jsonError(new Error("Vision analysis cancelled."), 499);
-      }
-      const contextualMessages = plan.systemContext
-        ? injectVisionContext(messages, plan.systemContext)
-        : messages;
-      if (plan.summary) {
-        log.info("✓ Vision JSON passed to reasoning model", {
+        log.info("Final answer", {
           requestId,
-          state: visionState,
-          summary: plan.summary,
+          chars: text.length,
+          text,
+          latencyMs: Date.now() - startedAt,
         });
+        return Response.json({ text, vision: plan.summary, routing: telemetry });
       }
+      if (toolIntent !== "llm") {
+        const plan = await resolveToolPlan();
+        log.info("[tool-routing]", { requestId, ...plan.routing });
+        if (plan.kind === "direct") {
+          return Response.json({ text: plan.text, toolRouting: plan.routing });
+        }
+        const text = await aiService.generateText({
+          ...options,
+          signal: requestAbort.signal,
+          messages: withDefaultSystem(
+            injectSystemBlock(messages, plan.systemContext)
+          ),
+        });
+        log.info("Final answer", {
+          requestId,
+          chars: text.length,
+          text,
+          latencyMs: Date.now() - startedAt,
+        });
+        return Response.json({ text, toolRouting: plan.routing });
+      }
+      log.info("Text-only request — vision skipped", { requestId });
       const text = await aiService.generateText({
         ...options,
-        signal: request.signal,
-        messages: withDefaultSystem(contextualMessages),
+        signal: requestAbort.signal,
+        messages: withDefaultSystem(messages),
       });
-      const telemetry = routingTelemetry(route.meta, true, startedAt);
-      log.info("[routing]", { ...telemetry });
-      log.info("Final answer", {
-        requestId,
-        chars: text.length,
-        text,
-        latencyMs: Date.now() - startedAt,
-      });
-      return Response.json({ text, vision: plan.summary, routing: telemetry });
+      return Response.json({ text, vision: null });
     } catch (error) {
       return jsonError(error, 502);
     }
@@ -639,11 +888,12 @@ export async function POST(request: Request): Promise<Response> {
   return new Response(
     toSSE(
       createStream(),
-      request.signal,
+      requestAbort.signal,
       requestId,
       (text) => {
         log.info("Final answer", { requestId, chars: text.length, text });
-      }
+      },
+      () => requestAbort.abort()
     ),
     {
       headers: {
