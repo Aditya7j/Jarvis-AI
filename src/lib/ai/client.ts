@@ -6,7 +6,8 @@ import { visionService } from "@/lib/vision/vision-service";
 import { useVisionStore } from "@/stores/vision-store";
 import { classifyVisionDepth, classifyVisionIntent } from "./vision-intent";
 import { classifyPlanIntent } from "@/services/planner";
-import { getSystemClock } from "./system-tools";
+import { detectBattery } from "@/services/planner/intents";
+import { getSystemClock, logTimeService } from "./system-tools";
 import type {
   BatteryResult,
   GeolocationResult,
@@ -175,13 +176,15 @@ export class AIClient {
     // Browser-only system tools run here, BEFORE the LLM, so their verified
     // output travels with the request and the server never has to guess.
     const toolsBody: NonNullable<typeof body.tools> = {};
-    if (planIntent === "system-clock") {
-      toolsBody.systemClock = getSystemClock();
+    if (planIntent === "time" || planIntent === "date") {
+      const clock = getSystemClock();
+      logTimeService("chat-client", clock);
+      toolsBody.systemClock = clock;
     }
-    if (planIntent === "battery") {
+    if (planIntent === "system" && detectBattery(prompt)) {
       toolsBody.battery = await getBatteryInfo();
     }
-    if (planIntent === "geolocation" || planIntent === "weather") {
+    if (planIntent === "location" || planIntent === "weather") {
       toolsBody.geolocation = await requestGeolocation();
     }
     if (Object.keys(toolsBody).length > 0) {

@@ -49,6 +49,9 @@ async function transcribeViaServer(
       `audio.${extensionFor(mimeType)}`
     );
     form.append("model", config.whisperModel);
+    if (config.whisperLanguage) {
+      form.append("language", config.whisperLanguage);
+    }
     const res = await fetch(`${url}/v1/audio/transcriptions`, {
       method: "POST",
       body: form,
@@ -83,16 +86,18 @@ async function transcribeViaCli(
       inputPath,
       "--model",
       config.whisperModel,
-      "--language",
-      "en",
       "--output_format",
       "txt",
       "--output_dir",
       dir,
     ];
+    if (config.whisperLanguage) {
+      args.splice(4, 0, "--language", config.whisperLanguage);
+    }
     log.info("Running Whisper CLI", {
       command: config.whisperCommand,
       model: config.whisperModel,
+      language: config.whisperLanguage ?? "auto",
     });
     await execFileAsync(config.whisperCommand, args, {
       timeout: config.requestTimeoutMs,

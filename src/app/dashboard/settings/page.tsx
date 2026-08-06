@@ -9,6 +9,7 @@ import { conversationManager } from "@/lib/ai/conversation-manager";
 import { memoryClient } from "@/lib/memory/client";
 import type { HealthSummary, ProviderStatusDetail } from "@/lib/ai/types";
 import { Mic, Eye, Brain, Zap, Globe, Key, Check, ExternalLink, AlertTriangle, RefreshCw } from "lucide-react";
+import { formatTimestampTime } from "@/lib/time/time-service";
 
 type ProviderKey = "gemini" | "openai" | "anthropic" | "ollama";
 
@@ -306,7 +307,7 @@ export default function SettingsPage() {
                     </Button>
                     {health && (
                       <span className="text-xs text-white/30">
-                        Last checked {new Date(health.timestamp).toLocaleTimeString()}
+                        Last checked {formatTimestampTime(health.timestamp)}
                       </span>
                     )}
                   </div>

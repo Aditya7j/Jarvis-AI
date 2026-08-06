@@ -3,16 +3,29 @@
  * These run BEFORE the LLM so the model never has to guess time, date,
  * location, battery or weather. The tool output is the ONLY source of truth
  * and the LLM merely naturalizes it.
+ *
+ * The system clock lives in ONE place — the TimeService. This module only
+ * re-exports it so existing imports keep working.
  */
 
-export interface SystemClockFact {
-  iso: string;
-  unixMs: number;
-  time: string;
-  date: string;
-  timezone: string;
-  formatted: string;
-}
+import { getSystemClock } from "@/lib/time/time-service";
+
+export type {
+  SystemClockFact,
+  DayPart,
+} from "@/lib/time/time-service";
+export {
+  getSystemClock,
+  getTimezone,
+  getGreeting,
+  getDayPart,
+  getDayStart,
+  getDayEnd,
+  formatClockTime,
+  formatClockDate,
+  formatTimestampTime,
+  logTimeService,
+} from "@/lib/time/time-service";
 
 export interface GeolocationFact {
   latitude: number;
@@ -46,42 +59,6 @@ export interface WeatherFact {
   location: { latitude: number; longitude: number };
   observedAt: string;
   source: string;
-}
-
-const FULL_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  weekday: "long",
-  year: "numeric",
-  month: "long",
-  day: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  timeZoneName: "short",
-});
-
-const TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  hour: "numeric",
-  minute: "2-digit",
-  timeZoneName: "short",
-});
-
-const DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  weekday: "long",
-  year: "numeric",
-  month: "long",
-  day: "numeric",
-});
-
-/** Verified current time/date/timezone in the local timezone. */
-export function getSystemClock(now = new Date()): SystemClockFact {
-  return {
-    iso: now.toISOString(),
-    unixMs: now.getTime(),
-    time: TIME_FORMATTER.format(now),
-    date: DATE_FORMATTER.format(now),
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    formatted: FULL_TIME_FORMATTER.format(now),
-  };
 }
 
 const WEATHER_API_URL = "https://api.open-meteo.com/v1/forecast";
@@ -126,7 +103,8 @@ const WMO_CONDITIONS: Record<number, string> = {
 export async function getWeather(
   latitude: number,
   longitude: number,
-  timeoutMs = 8_000
+  timeoutMs = 8_000,
+  signal?: AbortSignal
 ): Promise<WeatherFact> {
   const params = new URLSearchParams({
     latitude: String(latitude),
@@ -137,6 +115,8 @@ export async function getWeather(
   });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onOuterAbort = () => controller.abort();
+  signal?.addEventListener("abort", onOuterAbort, { once: true });
   try {
     const res = await fetch(`${WEATHER_API_URL}?${params.toString()}`, {
       signal: controller.signal,
@@ -174,10 +154,11 @@ export async function getWeather(
           : null,
       condition: WMO_CONDITIONS[current.weather_code ?? -1] ?? "Unknown",
       location: { latitude, longitude },
-      observedAt: current.time ?? new Date().toISOString(),
+      observedAt: current.time ?? getSystemClock().iso,
       source: "Open-Meteo",
     };
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onOuterAbort);
   }
 }

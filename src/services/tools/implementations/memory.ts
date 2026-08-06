@@ -7,6 +7,7 @@
 import { memoryService } from "@/lib/memory";
 import { MEMORY_CATEGORIES, type MemoryCategory } from "@/lib/memory/types";
 import { numberArg, stringArg } from "../args";
+import { validateMemorySearch } from "../validators";
 import type { Tool } from "../types";
 
 function categoryArg(args: Record<string, unknown>): MemoryCategory | undefined {
@@ -32,6 +33,7 @@ export const searchMemory: Tool = {
     cacheable: true,
     cacheTtlMs: 30_000,
     timeoutMs: 5_000,
+    validate: validateMemorySearch,
   },
   run: async (args) => {
     const query = stringArg(args, "query") ?? "";
@@ -67,6 +69,7 @@ export const listMemories: Tool = {
     cacheable: true,
     cacheTtlMs: 30_000,
     timeoutMs: 5_000,
+    validate: validateMemorySearch,
   },
   run: async (args) => {
     const entries = await memoryService.listEntries({

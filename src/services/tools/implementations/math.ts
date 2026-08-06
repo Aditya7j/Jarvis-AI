@@ -11,6 +11,7 @@ import {
   parseConversionRequest,
 } from "@/lib/toolkit/convert";
 import { numberArg, stringArg } from "../args";
+import { validateConvertResult, validateMathResult } from "../validators";
 import type { Tool } from "../types";
 
 export const calculate: Tool = {
@@ -26,6 +27,7 @@ export const calculate: Tool = {
     cacheable: true,
     cacheTtlMs: 60_000,
     timeoutMs: 2_000,
+    validate: validateMathResult,
   },
   run: async (args) => {
     const expression = stringArg(args, "expression");
@@ -54,6 +56,7 @@ export const convertUnits: Tool = {
     cacheable: true,
     cacheTtlMs: 60_000,
     timeoutMs: 2_000,
+    validate: validateConvertResult,
   },
   run: async (args) => {
     const value = numberArg(args, "value", NaN);

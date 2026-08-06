@@ -12,7 +12,8 @@
  */
 
 import { aiLogger } from "@/lib/ai/logger";
-import { getSystemClock, type SystemClockFact } from "@/lib/ai/system-tools";
+import { getSystemClock, logTimeService } from "@/lib/time/time-service";
+import type { SystemClockFact } from "@/lib/time/time-service";
 import { getVisionStateStore } from "@/lib/vision/vision-state";
 import { collectSystemSnapshot } from "./system-collector";
 import type {
@@ -128,7 +129,9 @@ class ContextEngine implements EngineHandle {
   }
 
   getAwareness(): AwarenessSnapshot {
-    return buildAwareness(this.state, getSystemClock());
+    const clock = getSystemClock();
+    logTimeService("context-engine", clock);
+    return buildAwareness(this.state, clock);
   }
 }
 

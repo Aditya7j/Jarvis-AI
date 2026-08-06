@@ -3,7 +3,8 @@
  * the time itself; this tool is the only source of truth.
  */
 
-import { getSystemClock } from "@/lib/ai/system-tools";
+import { getSystemClock, logTimeService } from "@/lib/time/time-service";
+import { validateClockFact } from "../validators";
 import type { Tool } from "../types";
 
 export const getCurrentTime: Tool = {
@@ -12,11 +13,15 @@ export const getCurrentTime: Tool = {
     description: "Get the current date, time and timezone of this machine.",
     category: "time",
     runtime: "any",
-    cacheable: true,
-    cacheTtlMs: 1_000,
+    cacheable: false,
     timeoutMs: 2_000,
+    validate: validateClockFact,
   },
-  run: async () => getSystemClock(),
+  run: async () => {
+    const clock = getSystemClock();
+    logTimeService("get_current_time", clock);
+    return clock;
+  },
 };
 
 export const timeTools: Tool[] = [getCurrentTime];

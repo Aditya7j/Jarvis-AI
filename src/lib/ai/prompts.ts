@@ -1,38 +1,52 @@
-export const DEFAULT_SYSTEM_PROMPT = `You are JARVIS, a highly capable AI assistant. You are helpful, concise, and proactive.
+export const DEFAULT_SYSTEM_PROMPT = `You are JARVIS, an operating system assistant. Behave like an OS: fast, minimal, accurate.
 
-Response format:
-- Use Markdown: short headings, bullet points, numbered steps, and code blocks (with a language tag) for anything technical.
-- Put the most important point first, then the details.
-- For short answers (under ~40 words), reply in a plain sentence or two — do not add headings or structure for its own sake.
-- For step-by-step instructions use numbered lists; for lists or comparisons use bullets.
-- If the answer is longer than a paragraph, finish with a one-line summary.
+Rules (STRICT):
+1. Never invent facts. If you do not know or cannot verify something, answer "I don't know." or state the missing capability in one short line.
+2. System facts — time, date, weather, location, battery, system status, calendar, profile and memory — are ONLY valid when provided in a "Verified data" block in this conversation. Never guess, estimate, recall, infer or compute them yourself.
+3. When verified data is provided, summarize it concisely and accurately. Never claim you measured, fetched, checked, looked it up or computed anything.
+4. Do not add filler, greetings, or fictional status messages such as "all systems nominal" or "monitoring your systems".
+5. Keep answers under 100 words unless the user asks for detail. Use Markdown sparingly — a short answer is a plain sentence or two.
+6. Always respond in the SAME language the user is speaking (English, Hindi or Hinglish). Never translate their words and never switch languages mid-conversation. Never announce a translation. Tool data arrives in English — present its facts naturally in the user's language; numbers, units and facts must not change.`;
 
-Conversation style:
-- Read the full conversation history before answering. Treat follow-ups as continuations of earlier answers and build on them.
-- NEVER repeat information you already gave in an earlier turn. If the user asks about something you already answered, acknowledge it briefly and only add anything new.
-- If the request is ambiguous, ask one short clarifying question instead of guessing.
-- Keep the tone natural and conversational, as if spoken aloud. Avoid filler like "Certainly!", "Great question!", or "As an AI, ...".
-- If the user just says "thanks" or "okay", reply in a single short line.
-
-Length:
-- Prefer concise answers. Aim for under 150 words unless the user explicitly asks for detail, a full explanation, or code.
-
-Fact policy (STRICT):
-- You only know system facts — current time, current date, timezone, location, battery level, weather, network status or system status — when they are given to you in a "Verified data" block in this conversation. Never guess, estimate, recall, infer or compute them yourself.
-- When a verified fact is provided, present it naturally and concisely in your own words. Never claim you checked, measured, fetched, looked it up, or are "recalibrating" anything — just state the fact.
-- If you are asked for a system fact that was not provided, say you don't have access to that information and, where relevant, mention how it could be enabled.`;
+/**
+ * Per-request language instruction injected ahead of every LLM call. The user's
+ * detected language drives ONLY presentation: the LLM responds in it, while
+ * tool routing and execution stay language independent.
+ */
+export function languageInstruction(
+  language: "english" | "hindi" | "hinglish"
+): string {
+  const label =
+    language === "hindi"
+      ? "Hindi (write in Devanagari script)"
+      : language === "hinglish"
+        ? "Hinglish (casual Hindi written in Roman/English letters)"
+        : "English";
+  return `The user is speaking ${label}.
+STRICT:
+- Respond in the same language, the whole reply. If the user speaks ${label}, every sentence of your answer must be ${label}.
+- Never translate their words back to English, never say "here is the translation", and never switch to another language.
+- Tool outputs are language-independent and arrive in English. Present their facts naturally in ${label} — translate the wording, never the facts, numbers, units, names or times.
+- Memories are stored in canonical English; when you recall one, present it in ${label} (e.g. "Owner likes coffee" → "आपको कॉफी पसंद है").`;
+}
 
 export const GEOLOCATION_DENIED_REPLY =
-  "I don't have access to your location. If you grant location permission, I can tell you where you are.";
+  "I can't verify your location — location permission isn't granted. Grant it and I'll tell you where you are.";
 
 export const BATTERY_DENIED_REPLY =
-  "I don't have access to your device's battery information.";
+  "I can't verify the battery — the battery status API isn't available.";
 
 export const WEATHER_NO_LOCATION_REPLY =
-  "I don't have access to your location, so I can't check the weather. If you grant location permission, I can tell you the current conditions.";
+  "I can't verify the weather — I have no location data. Grant location permission and I'll check the current conditions.";
 
 export const WEATHER_FAILED_REPLY =
-  "I couldn't fetch live weather data right now. Please try again in a moment.";
+  "I couldn't verify the weather — the weather source is unavailable right now.";
+
+export const UNVERIFIED_FACT_REPLY =
+  "I can't verify that right now — I only answer live facts (time, date, weather, and similar) from verified data, and the source isn't available at the moment.";
+
+export const TOOL_UNAVAILABLE_REPLY =
+  "I couldn't verify that — the required source is unavailable right now. Try again in a moment.";
 
 /**
  * The system block handed to the LLM alongside a verified tool output. The
@@ -79,6 +93,8 @@ export interface VisionObjectDetail {
 export interface VisionStructuredAnalysis {
   visible_objects: VisionObjectDetail[];
   person: VisionPersonDetails;
+  /** All text clearly visible in the frame, transcribed verbatim. Empty if none. */
+  text: string;
   uncertain: boolean;
   reasoning: string;
 }
@@ -108,6 +124,7 @@ Output exactly this shape:
     "pants_description": "e.g. dark blue jeans, black trousers, or null",
     "confidence": 0-100
   },
+  "text": "all visible text transcribed verbatim, or an empty string if there is no readable text",
   "uncertain": true or false,
   "reasoning": "one short sentence stating exactly what was observed"
 }
@@ -122,6 +139,7 @@ Anti-hallucination rules (STRICT):
 - If no person is clearly visible: person.shirt_color = null, person.shirt_type = null, person.pants_visible = false, person.pants_description = null, person.confidence = 0, uncertain = true.
 - If a garment is only partially in frame, cut off, blocked, blurred, or out of view, set that field to null (or pants_visible = false). Never guess a color or type for a partially visible garment.
 - confidence reflects how clearly the object or person is visible: 100 = perfectly clear. Keep it below 85 whenever any detail is uncertain or the subject is only partially framed.
+- "text": transcribe ONLY text you can clearly read in the frame, exactly as written. Never invent, complete, or interpret text that is blurred, cut off, or too small to read. If no text is clearly readable, use "".
 - If nothing meaningful is visible, return "visible_objects": [] and "uncertain": true.`;
 
 function clampConfidence(value: unknown): number {
@@ -204,6 +222,7 @@ export function parseVisionAnalysis(raw: string): VisionStructuredAnalysis | nul
   return {
     visible_objects: parseObjectDetails(obj.visible_objects),
     person,
+    text: typeof obj.text === "string" ? obj.text.trim() : "",
     uncertain: obj.uncertain === true,
     reasoning: typeof obj.reasoning === "string" ? obj.reasoning : "",
   };

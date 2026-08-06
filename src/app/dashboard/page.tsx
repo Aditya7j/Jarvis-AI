@@ -22,6 +22,13 @@ import {
   Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  formatClockDate,
+  formatClockTime,
+  getSystemClock,
+  logTimeService,
+  type SystemClockFact,
+} from "@/lib/time/time-service";
 
 function StatusDot({ active = false }: { active?: boolean }) {
   return (
@@ -34,12 +41,7 @@ function StatusDot({ active = false }: { active?: boolean }) {
   );
 }
 
-function TimeWidget() {
-  const [time, setTime] = useState(new Date());
-  useEffect(() => {
-    const timer = setInterval(() => setTime(new Date()), 10_000);
-    return () => clearInterval(timer);
-  }, []);
+function TimeWidget({ clock }: { clock: SystemClockFact }) {
   return (
     <GlassCard className="p-4 col-span-1">
       <div className="flex items-center justify-between mb-3">
@@ -47,17 +49,10 @@ function TimeWidget() {
         <span className="text-[10px] text-white/20">LOCAL TIME</span>
       </div>
       <p className="text-2xl font-light tracking-tight text-white/90">
-        {time.toLocaleTimeString("en-US", {
-          hour: "2-digit",
-          minute: "2-digit",
-        })}
+        {formatClockTime(new Date(clock.unixMs))}
       </p>
       <p className="text-xs text-white/30 mt-1">
-        {time.toLocaleDateString("en-US", {
-          weekday: "long",
-          month: "long",
-          day: "numeric",
-        })}
+        {formatClockDate(new Date(clock.unixMs))}
       </p>
     </GlassCard>
   );
@@ -261,6 +256,15 @@ function MemorySnapshot() {
 export default function DashboardPage() {
   const toggleSidebar = useAppStore((s) => s.toggleSidebar);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
+  const [clock, setClock] = useState<SystemClockFact>(() => getSystemClock());
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const next = getSystemClock();
+      logTimeService("dashboard-clock", next);
+      setClock(next);
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, []);
 
   return (
     <DashboardPageFrame>
@@ -300,8 +304,7 @@ export default function DashboardPage() {
         <main className="p-6">
           <div className="mb-6">
             <h1 className="text-2xl font-semibold text-white/90">
-              Good{" "}
-              {new Date().getHours() < 12 ? "morning" : "afternoon"}
+              {clock.greeting}
             </h1>
             <p className="text-sm text-white/30 mt-1">
               Your AI companion is ready.
@@ -309,7 +312,7 @@ export default function DashboardPage() {
           </div>
 
           <div className="grid grid-cols-4 gap-4">
-            <TimeWidget />
+            <TimeWidget clock={clock} />
             <AIStateWidget />
             <QuickActions />
             <SystemStatus />

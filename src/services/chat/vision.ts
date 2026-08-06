@@ -22,6 +22,8 @@ import {
 } from "@/lib/ai/prompts";
 import type { VisionDepth } from "@/lib/ai/vision-intent";
 import { CONFIDENCE_MID } from "@/lib/vision/confidence";
+import { localizeReply } from "@/lib/lang/replies";
+import type { SpokenLanguage } from "@/lib/lang/detect";
 import { saveDebugFrame } from "@/lib/vision/debug-frame";
 import {
   beginVisionAnalysis,
@@ -52,6 +54,8 @@ export interface VisionPlanInput {
   frames: VisionFrameInput[];
   model: PipelineModel;
   signal?: AbortSignal;
+  /** Detected user language — localizes the direct refusals. */
+  language: SpokenLanguage;
 }
 
 /**
@@ -198,7 +202,7 @@ function withConfidenceHedge(plan: VisionPlan): VisionPlan {
 export async function resolveVisionPlan(
   input: VisionPlanInput
 ): Promise<VisionPlanResult> {
-  const { prompt, depth, visionState, frames, model, signal } = input;
+  const { prompt, depth, visionState, frames, model, signal, language } = input;
   const resolution = await resolveVisualQuestion({
     prompt,
     depth,
@@ -208,12 +212,21 @@ export async function resolveVisionPlan(
   switch (resolution.kind) {
     case "cached":
     case "no-camera":
-    case "no-frame":
+    case "no-frame": {
+      let text = resolution.text;
+      if (language !== "english") {
+        if (resolution.kind === "no-camera") {
+          text = localizeReply(language, "noCamera");
+        } else if (resolution.kind === "no-frame") {
+          text = localizeReply(language, "noFrame");
+        }
+      }
       return {
         kind: "direct",
-        text: resolution.text,
+        text,
         summary: resolution.summary,
       };
+    }
     case "gemma": {
       const newest = resolution.frame;
       const cached = cachedVisionPlan(newest.source, newest);

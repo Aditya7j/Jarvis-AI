@@ -1,5 +1,7 @@
 "use client";
 
+import { detectSpeechLanguage } from "@/lib/lang/detect";
+
 const CHUNK_MAX_CHARS = 200;
 const SPEAK_AFTER_CANCEL_MS = 80;
 const PIPER_STATUS_TTL_MS = 30_000;
@@ -57,8 +59,21 @@ function chunkText(text: string): string[] {
   return chunks;
 }
 
-function pickVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
+function pickVoice(
+  voices: SpeechSynthesisVoice[],
+  language: "hi" | "en"
+): SpeechSynthesisVoice | null {
   if (voices.length === 0) return null;
+  if (language === "hi") {
+    const hindi = voices.filter((v) => v.lang.toLowerCase().startsWith("hi"));
+    if (hindi.length > 0) {
+      return (
+        hindi.find((v) => /google/i.test(v.name)) ??
+        hindi.find((v) => !v.localService) ??
+        hindi[0]
+      );
+    }
+  }
   const enUs = voices.filter((v) => v.lang.toLowerCase().startsWith("en-us"));
   const pool = enUs.length > 0 ? enUs : voices;
   return (
@@ -73,7 +88,8 @@ type AudioContextCtor = typeof AudioContext;
 
 class TTSManager {
   private synth: SpeechSynthesis | null = null;
-  private voice: SpeechSynthesisVoice | null = null;
+  private voices: SpeechSynthesisVoice[] = [];
+  private currentLang: "hi" | "en" = "en";
   private queue: string[] = [];
   private currentSpeaking = false;
   private generation = 0;
@@ -93,9 +109,10 @@ class TTSManager {
     if (!this.synth) return;
     const voices = this.synth.getVoices();
     if (voices.length === 0) return;
-    this.voice = pickVoice(voices);
+    this.voices = voices;
+    const preferred = pickVoice(voices, this.currentLang);
     console.info(
-      `[TTS] Voices loaded (${voices.length}); using "${this.voice?.name ?? "default"}"`
+      `[TTS] Voices loaded (${voices.length}); using "${preferred?.name ?? "default"}"`
     );
   }
 
@@ -116,11 +133,12 @@ class TTSManager {
 
   speak(text: string, onStart?: () => void, onEnd?: () => void): void {
     const generation = ++this.generation;
+    this.currentLang = detectSpeechLanguage(text);
     this.queue = [];
     this.synth?.cancel();
     this.currentSpeaking = true;
     console.info(
-      `[TTS] Speaking ${text.length} chars (piper-first)`
+      `[TTS] Speaking ${text.length} chars (piper-first, lang=${this.currentLang})`
     );
     this.notify(true);
 
@@ -136,7 +154,9 @@ class TTSManager {
     generation: number,
     onEnd?: () => void
   ): Promise<void> {
-    if (await piperAvailable()) {
+    // Hindi (Devanagari or Hinglish) is spoken with a Hindi voice via the
+    // browser; English Piper voices cannot pronounce it correctly.
+    if (this.currentLang !== "hi" && (await piperAvailable())) {
       try {
         const spoken = await this.speakViaPiper(text, generation, onEnd);
         if (spoken) return;
@@ -228,9 +248,12 @@ class TTSManager {
     }
     const chunk = this.queue.shift()!;
     const utterance = new SpeechSynthesisUtterance(chunk);
-    if (this.voice) {
-      utterance.voice = this.voice;
-      utterance.lang = this.voice.lang;
+    const voice = pickVoice(this.voices, this.currentLang);
+    if (voice) {
+      utterance.voice = voice;
+      utterance.lang = voice.lang;
+    } else if (this.currentLang === "hi") {
+      utterance.lang = "hi-IN";
     }
     utterance.rate = 1.0;
     utterance.pitch = 1.0;

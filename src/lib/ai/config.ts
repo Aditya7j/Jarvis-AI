@@ -24,6 +24,8 @@ export interface EnvConfig {
   whisperCommand: string;
   whisperServerUrl: string | null;
   whisperModel: string;
+  /** Optional language hint for Whisper (e.g. "hi", "en"). Omitted when unset so Whisper auto-detects. */
+  whisperLanguage: string | null;
   ttsMode: TtsMode;
   piperEnabled: boolean;
   piperCommand: string;
@@ -109,6 +111,7 @@ export function loadEnvConfig(): EnvConfig {
     whisperCommand: env("WHISPER_COMMAND") ?? "whisper",
     whisperServerUrl: env("WHISPER_SERVER_URL") ?? null,
     whisperModel: env("WHISPER_MODEL") ?? "base",
+    whisperLanguage: env("WHISPER_LANGUAGE"),
     ttsMode: readEnum("TTS_MODE", ["auto", "piper", "browser"] as const, "auto"),
     piperEnabled: readBoolean("PIPER_ENABLED", true),
     piperCommand: env("PIPER_COMMAND") ?? "piper",

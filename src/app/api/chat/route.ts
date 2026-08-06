@@ -152,6 +152,8 @@ function toSSE(
             continue;
           }
           if (event.kind === "fact") continue;
+          if (event.kind === "plan") continue;
+          if (event.kind === "source") continue;
           if (event.kind === "done") break;
           if (firstTokenAt === null) {
             firstTokenAt = Date.now();
@@ -269,6 +271,7 @@ export async function POST(request: Request): Promise<Response> {
       const startedAt = Date.now();
       let text = "";
       let summary: VisionAnalysisSummary | null = null;
+      let source: string | null = null;
       let toolRouting: {
         intent: string;
         tool: string;
@@ -279,6 +282,7 @@ export async function POST(request: Request): Promise<Response> {
       for await (const event of stream) {
         if (event.kind === "token") text += event.text;
         else if (event.kind === "vision") summary = event.summary;
+        else if (event.kind === "source") source = event.source;
         else if (event.kind === "tool") {
           toolRouting = {
             intent: event.intent,
@@ -293,9 +297,10 @@ export async function POST(request: Request): Promise<Response> {
         requestId,
         chars: text.length,
         text,
+        source,
         latencyMs: Date.now() - startedAt,
       });
-      return Response.json({ text, vision: summary, toolRouting });
+      return Response.json({ text, vision: summary, toolRouting, source });
     } catch (error) {
       return jsonError(error, 502);
     }

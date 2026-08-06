@@ -42,6 +42,10 @@ const COMPLEX_PATTERNS: RegExp[] = [
   /\bemotion\b/i,
   /\bfeelings?\b/i,
   /\bdoing\b/i,
+  /विस्तार\s+से/u,
+  /क्या\s+हो\s+रहा\s+है/u,
+  /क्या\s+चल\s+रहा\s+है/u,
+  /\b(?:detail\s+mein\s+batao|poora\s+batao|describe\s+karo|kya\s+ho\s+raha\s+hai)\b/i,
 ];
 
 /**
@@ -76,6 +80,18 @@ const SIMPLE_PATTERNS: RegExp[] = [
   /\b(phone|bottle|cup|mug|laptop|book|keyboard|mouse|remote)\s+(on\s+my\s+desk|on\s+the\s+desk|in\s+front)\b/i,
   /\bflag\b/i,
   /\bindian\s+flag\b/i,
+  /क्या\s+तुम\s+मुझे\s+देख\s+(?:सकते\s+हो|सकती\s+हो|रहे\s+हो|रही\s+हो)/u,
+  /मैं\s+क्या\s+पहन\s+(?:रखा\s+हूँ|रहा\s+हूँ|रही\s+हूँ)/u,
+  /मैंने\s+क्या\s+पहन\s+रखा\s+है/u,
+  /मेरे\s+हाथ\s+में\s+क्या\s+है/u,
+  /हाथ\s+में\s+क्या\s+(?:है|पकड़ा\s+है)/u,
+  /स्क्रीन\s+पर\s+क्या\s+(?:दिख\s+रहा|चल\s+रहा)\s+है/u,
+  /क्या\s+दिख\s+रहा\s+है/u,
+  /मेरे\s+सामने\s+क्या\s+है/u,
+  /\b(?:kya\s+tum\s+mujhe\s+dekh\s+(?:sakte|sakti|rahe|rahi)\s+ho)\b/i,
+  /\b(?:main\s+kya\s+pehna\s+hoon|maine\s+kya\s+pehena\s+hai)\b/i,
+  /\b(?:mere\s+haath\s+mein\s+kya\s+hai|haath\s+mein\s+kya\s+hai)\b/i,
+  /\b(?:screen\s+par\s+kya\s+(?:dikh\s+raha|chal\s+raha)\s+hai|kya\s+dikh\s+raha\s+hai|mere\s+saamne\s+kya\s+hai)\b/i,
 ];
 
 /** Classify how a vision prompt should be served: cache or Gemma. */
@@ -104,6 +120,19 @@ const STRONG_PATTERNS: RegExp[] = [
   /\bwhat\s+(is|was)\s+visible\b/i,
   /\btell\s+me\s+what\s+you\s+see\b/i,
   /\bcan\s+you\s+(tell|describe)\b/i,
+  /क्या\s+तुम\s+मुझे\s+देख\s+(?:सकते\s+हो|सकती\s+हो|रहे\s+हो|रही\s+हो)/u,
+  /तुम\s+मुझे\s+देख\s+रहे\s+हो/u,
+  /मैं\s+क्या\s+पहन\s+(?:रखा\s+हूँ|रहा\s+हूँ|रही\s+हूँ)/u,
+  /मैंने\s+क्या\s+पहन\s+रखा\s+है/u,
+  /मेरे\s+हाथ\s+में\s+क्या\s+है/u,
+  /हाथ\s+में\s+क्या\s+(?:है|पकड़ा\s+है)/u,
+  /स्क्रीन\s+पर\s+क्या\s+(?:दिख\s+रहा|चल\s+रहा)\s+है/u,
+  /क्या\s+दिख\s+रहा\s+है/u,
+  /मेरे\s+सामने\s+क्या\s+है/u,
+  /\b(?:kya\s+tum\s+mujhe\s+dekh\s+(?:sakte\s+ho|sakti\s+ho|rahe\s+ho|rahi\s+ho)|tum\s+mujhe\s+dekh\s+rahe\s+ho)\b/i,
+  /\b(?:main\s+kya\s+pehna\s+hoon|maine\s+kya\s+pehena\s+hai)\b/i,
+  /\b(?:mere\s+haath\s+mein\s+kya\s+hai|haath\s+mein\s+kya\s+hai)\b/i,
+  /\b(?:screen\s+par\s+kya\s+(?:dikh\s+raha|chal\s+raha)\s+hai|kya\s+dikh\s+raha\s+hai|mere\s+saamne\s+kya\s+hai)\b/i,
 ];
 
 /**
@@ -125,6 +154,17 @@ const CONDITIONAL_PATTERNS: RegExp[] = [
   /\bocr\b/i,
   /\bflag\b/i,
   /\bindian\s+flag\b/i,
+  /क्या\s+पहना\s+है/u,
+  /मेरे\s+आसपास\s+क्या\s+है/u,
+  /कमरे\s+में\s+क्या\s+है/u,
+  /मुझे\s+देखो/u,
+  /मेरी\s+तरफ\s+देखो/u,
+  /मेरा\s+कैमरा\s+देखो/u,
+  /स्क्रीन\s+पर\s+क्या\s+लिखा\s+है/u,
+  /पढ़कर\s+बताओ/u,
+  /\b(?:mujhe\s+dekh|meri\s+taraf\s+dekh|mera\s+camera\s+dekh)\b/i,
+  /\b(?:screen\s+par\s+kya\s+likha\s+hai|padhkar\s+batao)\b/i,
+  /\b(?:mere\s+aaspaas\s+kya\s+hai|kamre\s+mein\s+kya\s+hai)\b/i,
 ];
 
 const WEAK_PATTERNS: RegExp[] = [
@@ -155,6 +195,10 @@ const WEAK_PATTERNS: RegExp[] = [
   /\banybody\s+(else|there|here)\b/i,
   /\b(is|are)\s+there\s+(a|an|any)\s+(phone|bottle|cup|mug|laptop|book|keyboard|mouse|remote|person|people)\b/i,
   /\b(phone|bottle|cup|mug|laptop|book|keyboard|mouse|remote)\s+(on\s+(my\s+)?(desk|table|monitor)|in\s+front)\b/i,
+  /देख\s+सकते\s+हो/u,
+  /देख\s+रहे\s+हो/u,
+  /\bdekh\s+sakte\s+ho\b/i,
+  /\bdekh\s+rahe\s+ho\b/i,
 ];
 
 const NEGATION: RegExp =

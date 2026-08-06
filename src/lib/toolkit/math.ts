@@ -53,21 +53,52 @@ const WORD_OPERATORS: Record<string, string> = {
   "mod": "%",
 };
 
+const FUNCTION_CALL =
+  /\b(square\s+root|cube\s+root|sqrt|cbrt|sin|cos|tan|abs|ln|log10|log2|exp)\b(?:\s+of)?\s+(-?\d+(?:\.\d+)?)\b/gi;
+
 /** Normalize spoken/written arithmetic into a machine-readable expression. */
 export function normalizeExpression(input: string): string {
   let text = input.toLowerCase().trim();
-  text = text.replace(/\bwhat(?:'s|\s+is)\s+(?:the\s+)?(?:value\s+of\s+)?/i, "");
+  text = text.replace(/\bwhat(?:'s|s|\s+is|\s+are)\s+(?:the\s+)?(?:value\s+of\s+)?/i, "");
   text = text.replace(/[?]/g, "");
   text = text.replace(/,/g, "");
+  text = text.replace(
+    /\b(?:kitna\s+(?:hoga|hua|hai)|kya\s+(?:aayega|hoga|hua|hai))\b/gi,
+    " "
+  );
+  text = text.replace(
+    /(?:कितना\s+होगा|कितना\s+हुआ|क्या\s+आएगा|क्या\s+होगा|क्या\s+हुआ|क्या\s+है|गणना\s+करो)/gu,
+    " "
+  );
+  text = text.replace(
+    /(\d+)\s*(गुना|जोड़|भाग|घटा)\s*(\d+)/gu,
+    (_m, a: string, op: string, b: string) =>
+      `${a} ${({ "गुना": "*", "जोड़": "+", "भाग": "/", "घटा": "-" } as Record<string, string>)[op]} ${b}`
+  );
+  text = text.replace(
+    /(\d+)\s*(guna|jod|bhag|ghata)\s*(\d+)/gi,
+    (_m, a: string, op: string, b: string) =>
+      `${a} ${({ guna: "*", jod: "+", bhag: "/", ghata: "-" } as Record<string, string>)[op.toLowerCase()]} ${b}`
+  );
   for (const [word, symbol] of Object.entries(WORD_OPERATORS)) {
     text = text.replace(new RegExp(`\\b${word}\\b`, "gi"), ` ${symbol} `);
   }
-  text = text.replace(/\bsquare\s+root\s+of\b/gi, "sqrt(");
-  text = text.replace(/\bcube\s+root\s+of\b/gi, "cbrt(");
-  text = text.replace(/(sqrt|cbrt|sin|cos|tan|abs|ln|log10|log2|exp)\b\s+/gi, "$1(");
+  // "divide 20 by 4" -> "20 / 4"
+  text = text.replace(
+    /\bdivide\s+(-?\d+(?:\.\d+)?)\s+by\s+(-?\d+(?:\.\d+)?)\b/gi,
+    "$1 / $2"
+  );
+  // "square root of 81" / "sqrt 16" / "sin 30" -> "sqrt(81)" / "sqrt(16)" / "sin(30)"
+  text = text.replace(FUNCTION_CALL, (_match, fn: string, num: string) => {
+    const name = fn.trim().replace(/\s+/g, " ");
+    const key = name === "square root" ? "sqrt" : name === "cube root" ? "cbrt" : name;
+    return `${key}(${num})`;
+  });
   text = text.replace(/percent\b/gi, "%");
+  text = text.replace(/×/g, "*");
+  text = text.replace(/÷/g, "/");
   text = text.replace(/\bx\b/gi, "*");
-  text = text.replace(/(\d)\s*%\s*of\s*(\d)/g, "($1/100)*$2");
+  text = text.replace(/([\d.]+)\s*%\s*of\s*([\d.]+)/g, "($1/100)*$2");
   text = text.replace(/(\d)\s+and\s+(\d)/g, "$1 + $2");
   text = text.replace(/\s+/g, " ").trim();
   return text;
@@ -96,7 +127,7 @@ class Parser {
       if (this.next() !== ")") throw new Error("Missing closing parenthesis");
       return value;
     }
-    if (char === "p" || char === "e" || char === "t") {
+    if (/[a-z]/i.test(char)) {
       const ident = this.parseIdentifier();
       const constant = CONSTANTS[ident];
       if (constant === undefined) {
@@ -160,6 +191,10 @@ class Parser {
         this.next();
         value = factorial(value);
       } else if (char === "%") {
+        // Percent postfix ("50%" -> 0.5), unless a second operand follows
+        // ("10 % 3" is modulo, handled by parseTerm).
+        const afterModulo = this.input.slice(this.pos + 1).replace(/^\s+/, "");
+        if (/\d/.test(afterModulo[0] ?? "")) break;
         this.next();
         value = value / 100;
       } else {
@@ -204,8 +239,11 @@ class Parser {
         const divisor = this.parsePower();
         if (divisor === 0) throw new Error("Division by zero");
         value /= divisor;
-      } else if (char === "%" && /\d/.test(this.input[this.pos + 1] ?? "")) {
-        // Modulo between two numbers (e.g. 10 % 3).
+      } else if (char === "%") {
+        // Modulo between two numbers (e.g. 10 % 3). Skip whitespace when
+        // deciding whether a second operand follows.
+        const afterModulo = this.input.slice(this.pos + 1).replace(/^\s+/, "");
+        if (!/\d/.test(afterModulo[0] ?? "")) break;
         this.next();
         value %= this.parsePower();
       } else {

@@ -7,6 +7,7 @@ import { useVisionStore } from "@/stores/vision-store";
 import { cameraService } from "@/lib/camera";
 import { Camera, Monitor, X, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatTimestampTime } from "@/lib/time/time-service";
 
 const LiveThumbnail = memo(function LiveThumbnail({
   stream,
@@ -172,7 +173,7 @@ export function VisionStatusBar() {
           {lastAnalysis.state === "error"
             ? `Vision error: ${lastAnalysis.error ?? "pipeline failed"}`
             : lastAnalysis.capturedAt
-              ? `Analyzed ${new Date(lastAnalysis.capturedAt).toLocaleTimeString()} · conf ${
+              ? `Analyzed ${formatTimestampTime(lastAnalysis.capturedAt)} · conf ${
                   lastAnalysis.confidence ?? "-"
                 }% · ${lastAnalysis.objectCount} object(s)`
               : "Camera ON · awaiting frame analysis"}

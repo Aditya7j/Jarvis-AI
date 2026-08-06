@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useVisionStore } from "@/stores/vision-store";
 import { cameraService } from "@/lib/camera";
+import { formatTimestampTime } from "@/lib/time/time-service";
 import type { VisionStateSnapshot } from "@/lib/vision/vision-state";
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -133,7 +134,7 @@ export function VisionDebugOverlay() {
             label="Last call"
             value={
               vs?.lastGemma
-                ? `${new Date(vs.lastGemma.at).toLocaleTimeString()} · ${vs.lastGemma.reason}`
+                ? `${formatTimestampTime(vs.lastGemma.at)} · ${vs.lastGemma.reason}`
                 : "never (cache only)"
             }
           />

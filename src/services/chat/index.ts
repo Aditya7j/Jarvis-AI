@@ -11,3 +11,14 @@ export type {
   PipelineModel,
   PipelineOptions,
 } from "./pipeline";
+export {
+  hallucinationMonitor,
+  isHallucination,
+} from "./hallucination";
+export type {
+  HallucinationInstance,
+  HallucinationRecord,
+  HallucinationReport,
+  ResponseSource,
+  ToolTrace,
+} from "./hallucination";

@@ -15,6 +15,11 @@ import {
   type SearchResult,
 } from "@/lib/toolkit/web";
 import { numberArg, stringArg } from "../args";
+import {
+  validateCurrencyResult,
+  validateNewsResult,
+  validateWebSearch,
+} from "../validators";
 import type { Tool } from "../types";
 
 export const searchWeb: Tool = {
@@ -31,6 +36,7 @@ export const searchWeb: Tool = {
     cacheTtlMs: 5 * 60 * 1_000,
     timeoutMs: 8_000,
     retries: 1,
+    validate: validateWebSearch,
   },
   run: async (args): Promise<SearchResult | null> => {
     const query = stringArg(args, "query");
@@ -52,6 +58,7 @@ export const getNews: Tool = {
     cacheTtlMs: 5 * 60 * 1_000,
     timeoutMs: 8_000,
     retries: 1,
+    validate: validateNewsResult,
   },
   run: async (args) => {
     const limit = numberArg(args, "limit", 8, { min: 1, max: 10 });
@@ -75,6 +82,7 @@ export const convertCurrencyTool: Tool = {
     cacheTtlMs: 5 * 60 * 1_000,
     timeoutMs: 8_000,
     retries: 1,
+    validate: validateCurrencyResult,
   },
   run: async (args) => {
     const amount = numberArg(args, "amount", NaN);

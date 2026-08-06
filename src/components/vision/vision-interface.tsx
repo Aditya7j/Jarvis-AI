@@ -9,6 +9,7 @@ import type { CameraSource } from "@/lib/camera";
 import { liveVisionSession } from "@/lib/vision/live-vision-session";
 import { VisionDebugOverlay } from "./vision-debug-overlay";
 import { Camera, Monitor, StopCircle, AlertTriangle, Video, Gauge } from "lucide-react";
+import { formatTimestampTime } from "@/lib/time/time-service";
 
 export function VisionInterface() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -64,7 +65,7 @@ export function VisionInterface() {
       const frame = cameraService.getLatestFrame(activeMode);
       if (metaRef.current) {
         metaRef.current.textContent = frame
-          ? `Frame ${frame.width}×${frame.height} · ${new Date(frame.capturedAt).toLocaleTimeString()}`
+          ? `Frame ${frame.width}×${frame.height} · ${formatTimestampTime(frame.capturedAt)}`
           : "Waiting for first frame...";
       }
       if (analysisRef.current) {
@@ -77,9 +78,9 @@ export function VisionInterface() {
             live.newObjects.length > 0
               ? ` · new: ${live.newObjects.join(", ")}`
               : "";
-          analysisRef.current.textContent = `Live analyzed ${new Date(
+          analysisRef.current.textContent = `Live analyzed ${formatTimestampTime(
             live.summary.capturedAt ?? Date.now()
-          ).toLocaleTimeString()} · conf ${live.summary.confidence ?? "?"}% · ${
+          )} · conf ${live.summary.confidence ?? "?"}% · ${
             live.summary.objectCount
           } object(s)${extra}`;
         } else if (live?.error) {
@@ -89,9 +90,9 @@ export function VisionInterface() {
           if (analysis?.state === "error") {
             analysisRef.current.textContent = "Vision error — check server logs";
           } else if (analysis && analysis.state === "live" && analysis.capturedAt) {
-            analysisRef.current.textContent = `Analyzed ${new Date(
+            analysisRef.current.textContent = `Analyzed ${formatTimestampTime(
               analysis.capturedAt
-            ).toLocaleTimeString()} · conf ${analysis.confidence ?? "?"}% · ${
+            )} · conf ${analysis.confidence ?? "?"}% · ${
               analysis.objectCount
             } object(s)`;
           } else {

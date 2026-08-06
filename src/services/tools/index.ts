@@ -13,10 +13,12 @@ import { aiLogger } from "@/lib/ai/logger";
 import { fileTools } from "./implementations/files";
 import { mathTools } from "./implementations/math";
 import { memoryTools } from "./implementations/memory";
+import { personalTools } from "./implementations/personal";
 import { systemControlTools } from "./implementations/system-control";
 import { systemTools } from "./implementations/system";
 import { tasksTools } from "./implementations/tasks";
 import { timeTools } from "./implementations/time";
+import { weatherTools } from "./implementations/weather";
 import { webTools } from "./implementations/web";
 import { registerTool } from "./registry";
 
@@ -39,11 +41,13 @@ export function initToolRouter(): void {
     ...systemTools,
     ...systemControlTools,
     ...timeTools,
+    ...weatherTools,
     ...mathTools,
     ...webTools,
     ...memoryTools,
     ...fileTools,
     ...tasksTools,
+    ...personalTools,
   ]);
   log.info(`Tool Router initialized with ${toolCount()} tools`);
 }
@@ -53,11 +57,13 @@ export function toolCount(): number {
     systemTools.length +
     systemControlTools.length +
     timeTools.length +
+    weatherTools.length +
     mathTools.length +
     webTools.length +
     memoryTools.length +
     fileTools.length +
-    tasksTools.length
+    tasksTools.length +
+    personalTools.length
   );
 }
 

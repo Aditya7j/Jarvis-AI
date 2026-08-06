@@ -4,33 +4,43 @@
 
 export {
   classifyPlanIntent,
-  isDirectIntent,
+  classifyWithReasons,
+  isDirectClass,
   planRoute,
-  toolLabelForIntent,
-  INTENT_LABELS,
-  INTENT_TOOLS,
+  toolLabelForClass,
+  CLASS_LABELS,
+  toolsForClass,
+  toolsConsideredForClass,
+  TOOL_REQUIRED_REASONS,
 } from "./planner";
-export type { PlanIntent } from "./planner";
+export type { PlanClass } from "./planner";
 export {
   detectBattery,
+  detectCalendar,
   detectCalculator,
+  detectCasualConversation,
+  detectConversational,
   detectCurrency,
+  detectDate,
   detectGeolocation,
+  detectGreeting,
   detectMaps,
   detectMemory,
   detectMemoryRecall,
   detectMemoryStore,
   detectNews,
   detectOcr,
+  detectProfile,
   detectSystemClock,
   detectSystemStatus,
   detectTaskAction,
   detectTaskCreate,
   detectTaskList,
   detectTasks,
+  detectTime,
   detectUnitConversion,
   detectWeather,
   detectWebSearch,
 } from "./intents";
-export { DIRECT_TOOL_INTENTS } from "./types";
-export type { PlanInput, PlanRoute, PlanStep, VerifiedFact } from "./types";
+export { DIRECT_CLASSES } from "./types";
+export type { PlanAudit, PlanInput, PlanRoute, PlanStep, VerifiedFact } from "./types";

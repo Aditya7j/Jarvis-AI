@@ -4,6 +4,7 @@
  */
 
 import { taskEngine } from "@/services/tasks";
+import { getSystemClock, logTimeService } from "@/lib/time/time-service";
 import type { TaskRecurrence } from "@/services/tasks/types";
 import { numberArg, stringArg } from "../args";
 import type { Tool } from "../types";
@@ -17,7 +18,9 @@ function parseScheduledAt(args: Record<string, unknown>): number | null {
   }
   const inMinutes = numberArg(args, "inMinutes", NaN);
   if (Number.isFinite(inMinutes) && inMinutes > 0) {
-    return Date.now() + inMinutes * 60_000;
+    const clock = getSystemClock();
+    logTimeService("create_task", clock);
+    return clock.unixMs + inMinutes * 60_000;
   }
   return null;
 }

@@ -169,12 +169,33 @@ export async function executeTool(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const result = await runAttempt(tool, args, timeoutMs, options.signal);
     if (result.ok) {
+      if (tool.definition.validate) {
+        const check = tool.definition.validate(result.data);
+        if (!check.valid) {
+          log.warn(`Tool "${name}" produced an invalid result`, { reason: check.reason });
+          return {
+            ok: false,
+            error: {
+              code: TOOL_ERROR_CODES.VERIFICATION_FAILED,
+              message: `Tool "${name}" returned an unverifiable result: ${check.reason}`,
+              retryable: false,
+            },
+            meta: meta(name, startedAt, attempt, false, result.timedOut),
+          };
+        }
+      }
       const out: ToolResult = {
         ok: true,
         data: result.data,
         meta: meta(name, startedAt, attempt, false, result.timedOut),
       };
-      if (cacheKey) toolCache.set(cacheKey, result.data);
+      if (cacheKey) {
+        toolCache.set(
+          cacheKey,
+          result.data,
+          tool.definition.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS
+        );
+      }
       return out;
     }
     lastError = {

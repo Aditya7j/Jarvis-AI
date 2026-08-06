@@ -68,6 +68,6 @@ describe("chat pipeline (next /api/chat adapter contract)", () => {
       model
     );
     expect(result.text).toBe("Final answer here");
-    expect(result.intent).toBe("llm");
+    expect(result.intent).toBe("reasoning");
   });
 });

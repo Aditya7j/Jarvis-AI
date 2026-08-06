@@ -26,6 +26,8 @@ export type ToolCategory =
   | "clipboard"
   | "memory"
   | "tasks"
+  | "calendar"
+  | "profile"
   | "vision"
   | "browser"
   | "communication";
@@ -50,7 +52,21 @@ export interface ToolDefinition {
   timeoutMs?: number;
   /** Number of automatic retries after a retryable failure. Defaults to 0. */
   retries?: number;
+  /**
+   * Structural validation of the tool result. When present, a result that
+   * fails validation is treated as a `VERIFICATION_FAILED` failure — it is
+   * never cached and never fed to the LLM as a verified fact.
+   */
+  validate?: (data: unknown) => ToolValidation;
 }
+
+/**
+ * Result of validating a tool's output. `{ valid: true }` means the output is
+ * structurally sound enough to be treated as a verified fact.
+ */
+export type ToolValidation =
+  | { valid: true }
+  | { valid: false; reason: string };
 
 export interface ToolContext {
   signal?: AbortSignal;
@@ -87,6 +103,7 @@ export const TOOL_ERROR_CODES = {
   TIMEOUT: "TIMEOUT",
   INVALID_ARGS: "INVALID_ARGS",
   TOOL_FAILED: "TOOL_FAILED",
+  VERIFICATION_FAILED: "VERIFICATION_FAILED",
   UNSUPPORTED_RUNTIME: "UNSUPPORTED_RUNTIME",
 } as const;
 

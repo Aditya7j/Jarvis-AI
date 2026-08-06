@@ -4,6 +4,8 @@
  * and is cached so repeated questions never hit the network twice.
  */
 
+import { getSystemClock } from "@/lib/time/time-service";
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 interface CacheEntry<T> {
@@ -98,7 +100,7 @@ export async function convertCurrency(
       rate: 1,
       converted: amount,
       formatted: `${amount.toLocaleString("en-US")} ${toCode}`,
-      observedAt: new Date().toISOString(),
+      observedAt: getSystemClock().iso,
       source: "identity",
     };
   }
@@ -128,7 +130,7 @@ export async function convertCurrency(
     rate: round(rate),
     converted: round(rate * amount),
     formatted: `${round(rate * amount).toLocaleString("en-US", { maximumFractionDigits: 2 })} ${toCode}`,
-    observedAt: data.date ?? new Date().toISOString(),
+    observedAt: data.date ?? getSystemClock().iso,
     source: "Frankfurter (ECB)",
   };
   currencyCache.set(cacheKey, { value: result, at: Date.now() });
@@ -255,7 +257,9 @@ export async function fetchNews(
         url: item.url ?? `https://news.ycombinator.com/item?id=${id}`,
         score: item.score ?? 0,
         author: item.by ?? null,
-        time: item.time ? new Date(item.time * 1000).toISOString() : new Date().toISOString(),
+        time: item.time
+          ? new Date(item.time * 1000).toISOString()
+          : getSystemClock().iso,
         comments: item.descendants ?? 0,
       });
       if (items.length >= limit) break;
