@@ -229,7 +229,7 @@ export default function SettingsPage() {
   return (
     <DashboardPageFrame>
       <div>
-        <header className="border-b border-white/[0.03] bg-black/60 backdrop-blur-xl px-6 py-3">
+        <header className="hud-header px-6 py-3">
           <h1 className="text-sm text-white/60">Settings</h1>
         </header>
         <main className="p-6 max-w-4xl">
@@ -251,7 +251,7 @@ export default function SettingsPage() {
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder="Paste your Gemini API key..."
-                className="flex-1 px-3 py-2 rounded-xl bg-white/[0.03] border border-white/[0.05] text-sm text-white/70 placeholder:text-white/20 outline-none focus:border-blue-500/30"
+                className="flex-1 px-3 py-2 rounded-xl bg-white/[0.03] border border-white/[0.05] text-sm text-white/70 placeholder:text-white/20 outline-none focus:border-cyan-500/40 focus:shadow-[0_0_16px_rgba(56,189,248,0.08)] transition-all"
               />
               <Button size="sm" onClick={saveApiKey} variant={keySaved ? "secondary" : "default"} disabled={testingKey}>
                 {testingKey ? (

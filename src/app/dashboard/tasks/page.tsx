@@ -44,21 +44,21 @@ export default function TasksPage() {
   return (
     <DashboardPageFrame>
       <div>
-        <header className="border-b border-white/[0.03] bg-black/60 backdrop-blur-xl px-6 py-3">
+        <header className="hud-header px-6 py-3">
           <h1 className="text-sm text-white/60">Tasks</h1>
         </header>
         <main className="p-6 max-w-4xl">
           <div className="grid grid-cols-3 gap-4 mb-6">
             <GlassCard className="p-4 text-center">
-              <p className="text-2xl text-white/80 font-light">{stats.total}</p>
+              <p className="text-2xl text-white/80 font-light tabular-nums">{stats.total}</p>
               <p className="text-xs text-white/30 mt-1">Total Tasks</p>
             </GlassCard>
             <GlassCard className="p-4 text-center">
-              <p className="text-2xl text-green-400/80 font-light">{stats.completed}</p>
+              <p className="text-2xl text-green-400/80 font-light tabular-nums">{stats.completed}</p>
               <p className="text-xs text-white/30 mt-1">Completed</p>
             </GlassCard>
             <GlassCard className="p-4 text-center">
-              <p className="text-2xl text-blue-400/80 font-light">{stats.pending}</p>
+              <p className="text-2xl text-blue-400/80 font-light tabular-nums">{stats.pending}</p>
               <p className="text-xs text-white/30 mt-1">Pending</p>
             </GlassCard>
           </div>

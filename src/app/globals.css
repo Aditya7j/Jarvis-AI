@@ -26,7 +26,7 @@
     --destructive-foreground: 0 0% 98%;
     --border: 240 3.7% 15.9%;
     --input: 240 3.7% 15.9%;
-    --ring: 217 91% 60%;
+    --ring: 199 89% 56%;
     --radius: 0.75rem;
   }
 }
@@ -35,23 +35,69 @@
   * {
     @apply border-border;
   }
+  html {
+    color-scheme: dark;
+  }
   body {
     @apply bg-background text-foreground overflow-x-hidden;
     font-feature-settings: "rlig" 1, "calt" 1;
+    background-color: #05070d;
+    background-image:
+      radial-gradient(
+        1100px 700px at 15% -10%,
+        rgba(37, 99, 235, 0.12),
+        transparent 60%
+      ),
+      radial-gradient(
+        900px 650px at 105% 0%,
+        rgba(6, 182, 212, 0.07),
+        transparent 55%
+      ),
+      radial-gradient(
+        1000px 800px at 50% 118%,
+        rgba(124, 58, 237, 0.07),
+        transparent 60%
+      ),
+      linear-gradient(rgba(148, 163, 184, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(148, 163, 184, 0.035) 1px, transparent 1px);
+    background-size: auto, auto, auto, 52px 52px, 52px 52px;
+    background-attachment: fixed;
+  }
+  ::selection {
+    background: rgba(56, 189, 248, 0.3);
+    color: #fff;
+  }
+  :focus-visible {
+    outline: 2px solid rgba(56, 189, 248, 0.55);
+    outline-offset: 2px;
   }
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 8px;
+    height: 8px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 3px;
+    background: linear-gradient(
+      180deg,
+      rgba(59, 130, 246, 0.3),
+      rgba(34, 211, 238, 0.18)
+    );
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.2);
+    background: linear-gradient(
+      180deg,
+      rgba(59, 130, 246, 0.5),
+      rgba(34, 211, 238, 0.35)
+    );
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
   }
 }
 
@@ -89,15 +135,15 @@
   }
   .glow {
     box-shadow: 0 0 20px rgba(59, 130, 246, 0.3),
-                0 0 40px rgba(59, 130, 246, 0.1);
+      0 0 40px rgba(59, 130, 246, 0.1);
   }
   .glow-cyan {
     box-shadow: 0 0 20px rgba(6, 182, 212, 0.3),
-                0 0 40px rgba(6, 182, 212, 0.1);
+      0 0 40px rgba(6, 182, 212, 0.1);
   }
   .glow-purple {
     box-shadow: 0 0 20px rgba(168, 85, 247, 0.3),
-                0 0 40px rgba(168, 85, 247, 0.1);
+      0 0 40px rgba(168, 85, 247, 0.1);
   }
   .noise-bg {
     background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
@@ -115,5 +161,154 @@
       opacity: 1;
       transform: translateY(0);
     }
+  }
+
+  /* HUD corner brackets — applied to glass panels */
+  .hud-frame {
+    --hud: rgba(56, 189, 248, 0.5);
+    background-image: linear-gradient(var(--hud), var(--hud)),
+      linear-gradient(var(--hud), var(--hud)),
+      linear-gradient(var(--hud), var(--hud)),
+      linear-gradient(var(--hud), var(--hud)),
+      linear-gradient(var(--hud), var(--hud)),
+      linear-gradient(var(--hud), var(--hud)),
+      linear-gradient(var(--hud), var(--hud)),
+      linear-gradient(var(--hud), var(--hud));
+    background-position: left top, left top, right top, right top, left bottom,
+      left bottom, right bottom, right bottom;
+    background-size: 10px 1px, 1px 10px, 10px 1px, 1px 10px, 10px 1px, 1px 10px,
+      10px 1px, 1px 10px;
+    background-repeat: no-repeat;
+  }
+  .hud-frame:hover {
+    --hud: rgba(56, 189, 248, 0.8);
+  }
+
+  /* Header with arc glow underline */
+  .hud-header {
+    position: relative;
+    background: rgba(2, 4, 8, 0.55);
+  }
+  .hud-header::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(56, 189, 248, 0.45),
+      rgba(34, 211, 238, 0.2),
+      transparent
+    );
+    opacity: 0.55;
+    pointer-events: none;
+  }
+
+  /* Pulsing reactor dot — color via --reactor */
+  .reactor {
+    position: relative;
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
+    background: var(--reactor, rgba(56, 189, 248, 0.95));
+    box-shadow: 0 0 8px var(--reactor, rgba(56, 189, 248, 0.8));
+  }
+  .reactor::after {
+    content: "";
+    position: absolute;
+    inset: -5px;
+    border-radius: 9999px;
+    border: 1px solid var(--reactor, rgba(56, 189, 248, 0.4));
+    animation: reactor-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+  }
+  @keyframes reactor-ping {
+    0% {
+      transform: scale(0.6);
+      opacity: 1;
+    }
+    80%,
+    100% {
+      transform: scale(1.8);
+      opacity: 0;
+    }
+  }
+
+  /* Energy sweep on primary buttons */
+  .btn-sheen {
+    position: relative;
+    overflow: hidden;
+  }
+  .btn-sheen::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -80%;
+    width: 55%;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.18),
+      transparent
+    );
+    transform: skewX(-20deg);
+    animation: btn-sheen 4.5s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes btn-sheen {
+    0%,
+    55% {
+      left: -80%;
+    }
+    100% {
+      left: 200%;
+    }
+  }
+
+  /* Moving scanline */
+  .scanline {
+    position: relative;
+    overflow: hidden;
+  }
+  .scanline::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(56, 189, 248, 0.6),
+      transparent
+    );
+    animation: hud-scan 5s linear infinite;
+    pointer-events: none;
+  }
+  @keyframes hud-scan {
+    0% {
+      top: -8%;
+      opacity: 0;
+    }
+    12% {
+      opacity: 1;
+    }
+    88% {
+      opacity: 1;
+    }
+    100% {
+      top: 108%;
+      opacity: 0;
+    }
+  }
+
+  /* Soft arc glow for headings */
+  .text-glow {
+    text-shadow: 0 0 24px rgba(59, 130, 246, 0.4),
+      0 0 60px rgba(34, 211, 238, 0.2);
   }
 }

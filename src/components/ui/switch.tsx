@@ -31,7 +31,7 @@ export function Switch({
         className={cn(
           "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-200",
           checked
-            ? "bg-blue-600 shadow-[0_0_10px_rgba(59,130,246,0.4)]"
+            ? "bg-gradient-to-r from-blue-600 to-cyan-500 shadow-[0_0_14px_rgba(56,189,248,0.5)]"
             : "bg-white/[0.08] border border-white/[0.08]"
         )}
       >

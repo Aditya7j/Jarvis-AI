@@ -71,7 +71,7 @@ export default function LandingPage() {
               </motion.div>
 
               <h1 className="text-6xl sm:text-7xl md:text-8xl lg:text-9xl font-bold tracking-tight mb-4">
-                <span className="text-gradient">JARVIS</span>
+                <span className="text-gradient text-glow">JARVIS</span>
               </h1>
 
               <div className="h-8 overflow-hidden">
@@ -98,7 +98,7 @@ export default function LandingPage() {
             >
               <button
                 onClick={() => router.push("/dashboard")}
-                className="group relative px-8 py-3.5 rounded-full bg-gradient-to-r from-blue-600 to-blue-500 text-white font-medium text-sm tracking-wide overflow-hidden transition-all duration-300 hover:shadow-[0_0_30px_rgba(59,130,246,0.4)]"
+                className="btn-sheen group relative px-8 py-3.5 rounded-full bg-gradient-to-r from-blue-600 to-blue-500 text-white font-medium text-sm tracking-wide overflow-hidden transition-all duration-300 hover:shadow-[0_0_40px_rgba(56,189,248,0.5)]"
               >
                 <span className="relative z-10 flex items-center gap-2">
                   Launch JARVIS

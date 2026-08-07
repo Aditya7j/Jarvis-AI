@@ -262,7 +262,7 @@ export default function MemoryPage() {
   return (
     <DashboardPageFrame>
       <div>
-        <header className="border-b border-white/[0.03] bg-black/60 backdrop-blur-xl px-6 py-3">
+        <header className="hud-header px-6 py-3">
           <h1 className="text-sm text-white/60">Memory</h1>
         </header>
 

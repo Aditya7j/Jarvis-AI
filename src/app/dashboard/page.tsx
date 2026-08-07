@@ -32,12 +32,19 @@ import {
 
 function StatusDot({ active = false }: { active?: boolean }) {
   return (
-    <span
-      className={cn(
-        "inline-block w-1.5 h-1.5 rounded-full",
-        active ? "bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]" : "bg-white/20"
+    <span className="relative inline-flex h-1.5 w-1.5">
+      {active && (
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-50" />
       )}
-    />
+      <span
+        className={cn(
+          "relative inline-flex rounded-full h-1.5 w-1.5",
+          active
+            ? "bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.8)]"
+            : "bg-white/20"
+        )}
+      />
+    </span>
   );
 }
 
@@ -48,10 +55,10 @@ function TimeWidget({ clock }: { clock: SystemClockFact }) {
         <Clock className="w-4 h-4 text-white/30" />
         <span className="text-[10px] text-white/20">LOCAL TIME</span>
       </div>
-      <p className="text-2xl font-light tracking-tight text-white/90">
+      <p className="text-3xl font-mono font-light tracking-tight text-white/90 tabular-nums">
         {formatClockTime(new Date(clock.unixMs))}
       </p>
-      <p className="text-xs text-white/30 mt-1">
+      <p className="text-xs text-white/30 mt-1 tabular-nums">
         {formatClockDate(new Date(clock.unixMs))}
       </p>
     </GlassCard>
@@ -269,7 +276,7 @@ export default function DashboardPage() {
   return (
     <DashboardPageFrame>
       <div>
-        <header className="sticky top-0 z-20 border-b border-white/[0.03] bg-black/60 backdrop-blur-xl">
+        <header className="hud-header sticky top-0 z-20 backdrop-blur-xl">
           <div className="flex items-center justify-between px-6 h-14">
             <div className="flex items-center gap-4">
               <button
@@ -303,7 +310,7 @@ export default function DashboardPage() {
 
         <main className="p-6">
           <div className="mb-6">
-            <h1 className="text-2xl font-semibold text-white/90">
+            <h1 className="text-2xl font-semibold text-white/90 text-glow">
               {clock.greeting}
             </h1>
             <p className="text-sm text-white/30 mt-1">

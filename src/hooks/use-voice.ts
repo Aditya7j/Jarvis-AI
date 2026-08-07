@@ -3,15 +3,17 @@
 import { useEffect, useRef, useCallback } from "react";
 import { useVoiceStore } from "@/stores/voice-store";
 import { useConversationStore } from "@/stores/conversation-store";
-import {isSpeechRecognitionSupported,transcribeViaServer} from "@/lib/stt";
+import { isSpeechRecognitionSupported, transcribeViaServer } from "@/lib/stt";
 import { tts, isTtsSupported } from "@/lib/tts";
 import { triggerInterrupt } from "@/lib/interrupt";
+import {
+  VoiceSessionController,
+  logVoiceEvent,
+  type RecognitionLike,
+} from "@/lib/voice/lifecycle";
 
 const WAKE_WORD = "hey jarvis";
 const DEEPGRAM_MAX_RECORDING_MS = 20_000;
-const RESTART_DELAY_MS = 300;
-const RESTART_AFTER_CLOSE_MS = 150;
-const RECORDER_FLUSH_TIMEOUT_MS = 2_000;
 
 const INTERRUPT_PHRASES = [
   "stop",
@@ -25,23 +27,13 @@ const INTERRUPT_PHRASES = [
   "cancel",
 ];
 
-type SpeechRecognitionLike = Pick<
-  SpeechRecognition,
-  "continuous" | "interimResults" | "lang" | "start" | "stop" | "abort"
-> & {
-  onstart: (() => void) | null;
-  onresult: ((event: SpeechRecognitionEvent) => void) | null;
-  onend: (() => void) | null;
-  onerror: ((event: { error: string }) => void) | null;
-};
+type SpeechRecognitionCtor = new () => RecognitionLike;
 
-function getSpeechRecognitionAPI():
-  | (new () => SpeechRecognitionLike)
-  | null {
+function getSpeechRecognitionAPI(): SpeechRecognitionCtor | null {
   if (typeof window === "undefined") return null;
   const w = window as unknown as {
-    SpeechRecognition?: new () => SpeechRecognitionLike;
-    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+    SpeechRecognition?: SpeechRecognitionCtor;
+    webkitSpeechRecognition?: SpeechRecognitionCtor;
   };
   return w.SpeechRecognition || w.webkitSpeechRecognition || null;
 }
@@ -82,6 +74,8 @@ function micErrorMessage(code: string): string {
       return "Speech recognition needs a network connection. Check your internet and try again.";
     case "no-speech":
       return "";
+    case "unsupported":
+      return "Live voice input is not supported in this browser. Use Chrome or Edge for wake-word listening, or type your message.";
     default:
       return `Speech recognition error: ${code}`;
   }
@@ -100,178 +94,101 @@ export function useVoice() {
   const isRunning = useRef(false);
   const listeningModeRef = useRef(true);
   const recognitionActiveRef = useRef(false);
-  const pausedRef = useRef(false);
-  const activeSessionRef = useRef<SpeechRecognitionLike | null>(null);
-  const restartTimerRef = useRef<number | null>(null);
+  const controllerRef = useRef<VoiceSessionController | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | null>(null);
   const lastSpokenRef = useRef("");
 
-  const startSession = useCallback(() => {
-    if (!isRunning.current) return;
-    const SpeechRecognitionAPI = getSpeechRecognitionAPI();
-    if (!SpeechRecognitionAPI) {
-      setMicError({
-        code: "unsupported",
-        message:
-          "Live voice input is not supported in this browser. Use Chrome or Edge for wake-word listening, or type your message.",
-      });
-      return;
-    }
-
-    if (activeSessionRef.current) {
-      if (!recognitionActiveRef.current) {
-        scheduleRestartRef.current(
-          "awaiting previous session close",
-          RESTART_AFTER_CLOSE_MS
+  const handleFinal = useCallback(
+    (transcript: string) => {
+      const lower = transcript.toLowerCase();
+      if (isInterruptPhrase(lower)) {
+        console.info(
+          `[STT] Interrupt command detected: "${transcript.trim()}"`
         );
+        listeningModeRef.current = true;
+        setState("idle");
+        setInterimTranscript("");
+        triggerInterrupt();
+        return;
       }
-      return;
-    }
-
-    const recognition = new SpeechRecognitionAPI();
-    activeSessionRef.current = recognition;
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = "en-US";
-
-    recognition.onstart = () => {
-      console.info("[STT] Recognition session started");
-      recognitionActiveRef.current = true;
-      if (!listeningModeRef.current) {
-        setState("listening");
-      }
-    };
-
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i][0].transcript;
-        const lower = result.toLowerCase();
-        if (event.results[i].isFinal) {
-          if (isInterruptPhrase(lower)) {
+      if (listeningModeRef.current) {
+        const wakeIndex = lower.indexOf(WAKE_WORD);
+        if (wakeIndex !== -1) {
+          listeningModeRef.current = false;
+          setState("listening");
+          const command = transcript
+            .slice(wakeIndex + WAKE_WORD.length)
+            .trim();
+          if (command) {
+            console.info(`[STT] Command captured: "${command}"`);
+            setInterimTranscript("");
+            setTranscript(command);
+            setTranscription(command);
+          }
+        }
+      } else {
+        const command = transcript.trim();
+        if (command) {
+          const speaking = tts.isSpeaking;
+          if (speaking && isEcho(command, lastSpokenRef.current)) {
+            console.info(`[STT] Ignoring echo while speaking: "${command}"`);
+            setInterimTranscript("");
+            return;
+          }
+          if (speaking) {
             console.info(
-              `[STT] Interrupt command detected: "${result.trim()}"`
+              `[STT] New command while speaking — interrupting: "${command}"`
             );
-            listeningModeRef.current = true;
-            setState("idle");
-            setInterimTranscript("");
             triggerInterrupt();
-            continue;
           }
-          if (listeningModeRef.current) {
-            const wakeIndex = lower.indexOf(WAKE_WORD);
-            if (wakeIndex !== -1) {
-              listeningModeRef.current = false;
-              setState("listening");
-              const command = result
-                .slice(wakeIndex + WAKE_WORD.length)
-                .trim();
-              if (command) {
-                console.info(`[STT] Command captured: "${command}"`);
-                setInterimTranscript("");
-                setTranscript(command);
-                setTranscription(command);
-              }
-            }
-          } else {
-            const command = result.trim();
-            if (command) {
-              const speaking = tts.isSpeaking;
-              if (speaking && isEcho(command, lastSpokenRef.current)) {
-                console.info(`[STT] Ignoring echo while speaking: "${command}"`);
-                setInterimTranscript("");
-                continue;
-              }
-              if (speaking) {
-                console.info(
-                  `[STT] New command while speaking — interrupting: "${command}"`
-                );
-                triggerInterrupt();
-              }
-              console.info(`[STT] Final transcript: "${command}"`);
-              setTranscript(command);
-              setTranscription(command);
-            }
-            setInterimTranscript("");
-            if (useVoiceStore.getState().continuousMode) {
-              if (recognitionActiveRef.current) {
-                setState("listening");
-              }
-            }
-          }
-        } else {
-          if (!listeningModeRef.current) {
-            const cleaned = stripWakeWord(result);
-            setInterimTranscript(cleaned || result);
+          console.info(`[STT] Final transcript: "${command}"`);
+          setTranscript(command);
+          setTranscription(command);
+        }
+        setInterimTranscript("");
+        if (useVoiceStore.getState().continuousMode) {
+          if (recognitionActiveRef.current) {
+            setState("listening");
           }
         }
       }
-    };
+    },
+    [setState, setTranscript, setInterimTranscript, setTranscription]
+  );
+  const handleFinalRef = useRef(handleFinal);
+  handleFinalRef.current = handleFinal;
 
-    recognition.onend = () => {
-      recognitionActiveRef.current = false;
-      if (activeSessionRef.current === recognition) {
-        activeSessionRef.current = null;
-      }
-      if (!isRunning.current) return;
-      if (pausedRef.current) {
-        console.info("[STT] Recognition paused — waiting for turn to finish");
-        return;
-      }
-      scheduleRestartRef.current("session ended", RESTART_DELAY_MS);
-    };
+  const handleInterim = useCallback(
+    (transcript: string) => {
+      if (listeningModeRef.current) return;
+      const cleaned = stripWakeWord(transcript);
+      setInterimTranscript(cleaned || transcript);
+    },
+    [setInterimTranscript]
+  );
+  const handleInterimRef = useRef(handleInterim);
+  handleInterimRef.current = handleInterim;
 
-    recognition.onerror = (e) => {
-      if (e.error === "aborted") return;
-      console.warn(`[STT] Recognition error: ${e.error}`);
-      const message = micErrorMessage(e.error);
+  const handleError = useCallback(
+    (code: string) => {
+      const message = micErrorMessage(code);
       if (message) {
         setMicError({ code: "recognition-error", message });
       }
-    };
-
-    try {
-      recognition.start();
-      recognitionActiveRef.current = true;
-      console.info("[STT] Recognition start requested");
-    } catch (error) {
-      console.error("[STT] Failed to start recognition:", error);
-      activeSessionRef.current = null;
-      if (isRunning.current) {
-        setMicError({
-          code: "recognition-error",
-          message:
-            "Voice recognition failed to start. Check your internet connection and try again.",
-        });
-        scheduleRestartRef.current("start failed", RESTART_DELAY_MS);
-      }
-    }
-  }, [setState, setTranscript, setInterimTranscript, setTranscription, setMicError]);
-
-  const scheduleRestart = useCallback((reason: string, delay: number) => {
-    if (restartTimerRef.current !== null) {
-      window.clearTimeout(restartTimerRef.current);
-    }
-    console.warn(`[STT] Restarting recognition (${reason}) in ${delay}ms`);
-    restartTimerRef.current = window.setTimeout(() => {
-      restartTimerRef.current = null;
-      startSessionRef.current();
-    }, delay);
-  }, []);
-
-  const startSessionRef = useRef(startSession);
-  startSessionRef.current = startSession;
-  const scheduleRestartRef = useRef(scheduleRestart);
-  scheduleRestartRef.current = scheduleRestart;
+    },
+    [setMicError]
+  );
+  const handleErrorRef = useRef(handleError);
+  handleErrorRef.current = handleError;
 
   const resumeContinuousMode = useCallback(() => {
     if (!isRunning.current) return;
-    pausedRef.current = false;
     listeningModeRef.current = false;
     console.info("[MIC] Continuous mode — resuming listening");
-    startSessionRef.current();
+    controllerRef.current?.resume();
     if (recognitionActiveRef.current) {
       setState("listening");
     }
@@ -286,7 +203,7 @@ export function useVoice() {
       if (enabled === store.continuousMode) return;
       store.setContinuousMode(enabled);
       if (enabled) {
-        if (pausedRef.current) {
+        if (controllerRef.current?.isPaused) {
           console.info(
             "[MIC] Continuous mode enabled — will resume after current turn"
           );
@@ -324,6 +241,8 @@ export function useVoice() {
         return;
       }
 
+      logVoiceEvent("MIC_STOPPED", "media recorder");
+
       const flushed = new Promise<void>((resolve) => {
         recorder.onstop = () => resolve();
       });
@@ -334,6 +253,7 @@ export function useVoice() {
         console.error("[STT] Failed to stop MediaRecorder:", error);
         stream?.getTracks().forEach((track) => track.stop());
         if (transcribe) {
+          logVoiceEvent("ERROR", "recorder stop failed");
           setMicError({
             code: "recognition-error",
             message: "Recording stopped unexpectedly. Try again.",
@@ -345,7 +265,7 @@ export function useVoice() {
       await Promise.race([
         flushed,
         new Promise((resolve) =>
-          window.setTimeout(resolve, RECORDER_FLUSH_TIMEOUT_MS)
+          window.setTimeout(resolve, 2_000)
         ),
       ]);
 
@@ -357,6 +277,7 @@ export function useVoice() {
       const blob = new Blob(chunksRef.current, { type: mimeType });
       chunksRef.current = [];
       if (blob.size === 0) {
+        logVoiceEvent("ERROR", "empty recording");
         setMicError({
           code: "recognition-error",
           message: "No audio was captured. Try speaking closer to the mic.",
@@ -364,14 +285,17 @@ export function useVoice() {
         return;
       }
 
+      logVoiceEvent("STT_STARTED", "server transcription");
       try {
         const text = await transcribeViaServer(blob, mimeType);
         const trimmed = text.trim();
         if (trimmed) {
           console.info(`[STT] Server transcript: "${trimmed}"`);
+          logVoiceEvent("STT_FINISHED", `"${trimmed}"`);
           setTranscript(trimmed);
           setTranscription(trimmed);
         } else {
+          logVoiceEvent("ERROR", "no speech detected");
           setMicError({
             code: "recognition-error",
             message: "No speech was detected in the recording. Try again.",
@@ -382,6 +306,7 @@ export function useVoice() {
           error instanceof Error
             ? error.message
             : "Speech-to-text failed. Install Whisper locally or use Chrome/Edge.";
+        logVoiceEvent("ERROR", "server transcription failed");
         setMicError({ code: "transcription-failed", message });
       }
     },
@@ -403,7 +328,7 @@ export function useVoice() {
         isRunning.current = true;
       }
       console.info("[MIC] Starting listen session");
-      startSessionRef.current();
+      controllerRef.current?.resume();
       if (recognitionActiveRef.current) {
         setState("listening");
       }
@@ -436,6 +361,7 @@ export function useVoice() {
       };
       recorder.onerror = (event) => {
         console.error("[MIC] MediaRecorder error:", event);
+        logVoiceEvent("ERROR", "media recorder error");
         setMicError({
           code: "recognition-error",
           message: "Microphone recording failed. Try again.",
@@ -446,6 +372,7 @@ export function useVoice() {
       mediaRecorderRef.current = recorder;
       recorder.start();
       console.info("[MIC] MediaRecorder started");
+      logVoiceEvent("MIC_STARTED", "media recorder");
       setState("listening");
       setMicActive(true);
       timerRef.current = window.setTimeout(() => {
@@ -453,6 +380,7 @@ export function useVoice() {
       }, DEEPGRAM_MAX_RECORDING_MS);
     } catch (error) {
       const name = (error as { name?: string })?.name;
+      logVoiceEvent("ERROR", `mic access: ${name ?? "unknown"}`);
       setState("idle");
       if (name === "NotAllowedError") {
         setMicError({
@@ -491,41 +419,49 @@ export function useVoice() {
     setMicActive(false);
   }, [setState, setTranscript, setInterimTranscript, setMicActive, stopServerRecording]);
 
-  const startWakeWordDetection = useCallback(() => {
-    if (isRunning.current) return;
+  useEffect(() => {
+    const SpeechRecognitionCtor = getSpeechRecognitionAPI();
+    if (!SpeechRecognitionCtor) return;
+
+    const controller = new VoiceSessionController({
+      createRecognition: () => new SpeechRecognitionCtor(),
+      onFinal: (text) => handleFinalRef.current(text),
+      onInterim: (text) => handleInterimRef.current(text),
+      onError: (code) => handleErrorRef.current(code),
+    });
+    controllerRef.current = controller;
+    const unsubscribe = controller.subscribe((event) => {
+      recognitionActiveRef.current = controller.isRecognizing;
+      if (event.name === "MIC_STARTED" && !listeningModeRef.current) {
+        setState("listening");
+      }
+    });
+
     isRunning.current = true;
     listeningModeRef.current = true;
     console.info("[MIC] Wake-word detection enabled");
-    startSessionRef.current();
-  }, []);
+    controller.start();
 
-  useEffect(() => {
-    if (isSpeechRecognitionSupported()) {
-      startWakeWordDetection();
-    }
     return () => {
       console.info("[MIC] Cleaning up voice pipeline");
       isRunning.current = false;
-      if (restartTimerRef.current !== null) {
-        window.clearTimeout(restartTimerRef.current);
-        restartTimerRef.current = null;
-      }
-      const session = activeSessionRef.current;
-      if (session) {
-        try { session.abort(); } catch {}
-        try { session.stop(); } catch {}
-      }
-      activeSessionRef.current = null;
+      unsubscribe();
+      controller.dispose();
+      controllerRef.current = null;
+      recognitionActiveRef.current = false;
       tts.stop();
       void stopServerRecording(false);
     };
-  }, [startWakeWordDetection, stopServerRecording]);
+  }, [setState, stopServerRecording]);
 
   useEffect(() => {
     return tts.subscribe((speaking) => {
       if (speaking) {
+        logVoiceEvent("TTS_STARTED");
+        controllerRef.current?.pause("assistant speaking");
         setState("speaking");
       } else {
+        logVoiceEvent("TTS_FINISHED");
         if (useVoiceStore.getState().continuousMode) {
           resumeContinuousRef.current();
         } else {

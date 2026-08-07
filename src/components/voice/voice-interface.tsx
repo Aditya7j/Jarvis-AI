@@ -39,8 +39,8 @@ const MessageBubble = memo(function MessageBubble({
         className={cn(
           "max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap",
           msg.role === "user"
-            ? "bg-blue-500/20 border border-blue-500/20 text-white/80"
-            : "bg-white/[0.03] border border-white/[0.05] text-white/70"
+            ? "bg-gradient-to-br from-blue-500/25 to-blue-600/10 border border-blue-500/30 text-white/90 shadow-[0_0_18px_rgba(59,130,246,0.15)]"
+            : "bg-white/[0.04] border border-white/[0.06] text-white/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]"
         )}
       >
         {msg.content}
@@ -262,14 +262,17 @@ export function VoiceInterface() {
   })();
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-1 min-h-0 flex-col">
       <div className="flex-1 overflow-y-auto p-4 space-y-4" ref={containerRef}>
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center px-8">
-            <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-blue-500/10 via-cyan-500/10 to-purple-500/10 flex items-center justify-center mb-6 border border-white/[0.05]">
-              <Bot className="w-10 h-10 text-blue-400/60" />
+            <div className="relative w-20 h-20 rounded-3xl bg-gradient-to-br from-blue-500/15 via-cyan-500/10 to-purple-500/15 flex items-center justify-center mb-6 border border-cyan-500/15 shadow-[0_0_40px_rgba(56,189,248,0.15)]">
+              <span className="absolute inset-0 rounded-3xl border border-cyan-300/20 animate-pulse-glow" />
+              <Bot className="w-10 h-10 text-blue-400/80" />
             </div>
-            <p className="text-white/30 text-sm">JARVIS is ready</p>
+            <p className="text-white/40 text-sm tracking-[0.3em] uppercase text-gradient font-medium">
+              Jarvis is ready
+            </p>
             <p className="text-white/15 text-xs mt-2 max-w-xs leading-relaxed">
               {statusLine}
             </p>
@@ -349,9 +352,9 @@ export function VoiceInterface() {
               setContinuousMode(!continuousMode);
             }}
             className={cn(
-              "relative w-9 h-5 rounded-full transition-colors duration-300",
+              "relative w-9 h-5 rounded-full transition-all duration-300",
               continuousMode
-                ? "bg-green-500/40"
+                ? "bg-gradient-to-r from-green-600/60 to-emerald-500/60 shadow-[0_0_12px_rgba(34,197,94,0.4)]"
                 : "bg-white/[0.08] hover:bg-white/[0.12]"
             )}
             aria-pressed={continuousMode}
@@ -405,7 +408,7 @@ export function VoiceInterface() {
               placeholder={
                 state === "listening" ? "Speak or type..." : "Ask JARVIS anything..."
               }
-              className="w-full px-4 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.05] text-sm text-white/70 placeholder:text-white/20 outline-none focus:border-blue-500/30 transition-all"
+              className="w-full px-4 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.05] text-sm text-white/70 placeholder:text-white/20 outline-none focus:border-cyan-500/40 focus:shadow-[0_0_16px_rgba(56,189,248,0.08)] transition-all"
             />
             {state === "listening" && !isProcessing && !isSpeaking && (
               <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">

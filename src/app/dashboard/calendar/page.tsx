@@ -25,7 +25,7 @@ export default function CalendarPage() {
   return (
     <DashboardPageFrame>
       <div>
-        <header className="border-b border-white/[0.03] bg-black/60 backdrop-blur-xl px-6 py-3">
+        <header className="hud-header px-6 py-3">
           <h1 className="text-sm text-white/60">Calendar</h1>
         </header>
         <main className="p-6 max-w-4xl">
@@ -60,7 +60,9 @@ export default function CalendarPage() {
                     key={day}
                     className={cn(
                       "aspect-square rounded-xl flex items-center justify-center text-sm cursor-pointer transition-all",
-                      isToday ? "bg-blue-500/20 text-blue-400 border border-blue-500/30" : "text-white/40 hover:bg-white/[0.05] hover:scale-[1.05]"
+                      isToday
+                        ? "bg-blue-500/20 text-blue-400 border border-cyan-500/40 shadow-[0_0_16px_rgba(56,189,248,0.25)]"
+                        : "text-white/40 hover:bg-white/[0.05] hover:border-cyan-500/20 hover:scale-[1.05]"
                     )}
                   >
                     <div className="relative">

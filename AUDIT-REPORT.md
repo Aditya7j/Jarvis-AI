@@ -1,168 +1,322 @@
-# JARVIS-AI Architecture Audit
+# JARVIS-AI — Full Read-Only Audit Report
 
-Date: 2026-08-04. Audit scope: full stack (frontend, Next.js API routes, Fastify sidecar, AI layer, vision, memory, tasks, context).
+Date: 2026-08-07
+Audit type: read-only. **No files were modified, added, or deleted during this audit.** Every finding below is verified directly against the working tree (source, routes, tests, config, `.env`, data files). Where a claim could not be verified, it is marked as such.
 
-## 1. Executive summary
+> This report supersedes the 2026-08-04 `AUDIT-REPORT.md`. That earlier report described an architecture (Fastify sidecar on :3001, monolithic `/api/chat`, dual tool registries, unused pipeline) that **no longer exists**. Section 2 documents the delta between that report and the current code.
 
-JARVIS-AI has **two parallel full-stack implementations that disagree with each other**. The UI only talks to the Next.js process (port 3000). The Fastify sidecar (port 3001) implements a newer, richer pipeline (deterministic intent planner → tool router → memory → CoT sanitizer) but **nothing calls it**. The main `/api/chat` route the UI actually uses is a monolithic legacy path that:
+---
 
-- has **no memory** (forgets everything),
-- has **no math/web/news/maps/tasks/unit/currency tools**,
-- runs **no chain-of-thought sanitizer**,
-- re-classifies intent that the client already classified,
-- layers a third vision cache on top of two existing ones.
+## 1. Workspace statistics
 
-That is the root cause of "inconsistent behavior": behavior differs depending on which entry point (or which classifier) is hit, and the newer architecture is unreachable from the product.
+| Metric | Value |
+|---|---|
+| TypeScript/TSX files under `src/` | 166 |
+| Total source lines (`src/**/*.{ts,tsx}`) | 24,837 |
+| Test files (`tests/*.test.ts`) | 17 |
+| Test file lines | 3,335 |
+| Passing tests (vitest) | 310 |
+| TypeScript check (`npm run typecheck`, `tsc --noEmit`) | Clean |
+| Lint (`npm run lint`) | No errors/warnings |
+| `node_modules` size | ~778 MB |
+| Runtime dependencies (`package.json`) | 20 |
+| Dev dependencies | 12 |
+| API route handlers (`src/app/api/**/route.ts`) | 19 |
+| Pages (`src/app/**/page.tsx`) | 10 |
+| Zustand stores | 4 |
+| React hooks | 1 (`use-voice`; vision logic lives in lib + stores) |
+| Git history | **Unavailable** — `git` binary not on PATH; could not run `git log/status/diff` |
 
-## 2. How it works today
+Dependencies (20): `@anthropic-ai/sdk`, `@fontsource-variable/inter`, `@fontsource-variable/jetbrains-mono`, `@google/generative-ai`, `@react-three/drei`, `@react-three/fiber`, `class-variance-authority`, `clsx`, `framer-motion`, `lucide-react`, `next`, `onnxruntime-node`, `openai`, `react`, `react-dom`, `sharp`, `tailwind-merge`, `three`, `typescript`, `zustand`.
+
+Dev dependencies (12): `@types/node`, `@types/react`, `@types/react-dom`, `@types/three`, `@types/ws`, `autoprefixer`, `eslint`, `eslint-config-next`, `postcss`, `prettier`, `tailwindcss`, `vitest`.
+
+Test files (17): `voice-lifecycle`, `vision-intent`, `verification`, `tools`, `time-service`, `time-freshness`, `task-engine`, `system-tools`, `reliability`, `reasoning`, `postprocess`, `planner`, `pipeline-chat`, `multilingual`, `math-hindi`, `context-window`, `confidence`.
+
+---
+
+## 2. Delta vs the 2026-08-04 architecture audit
+
+The old report's top problems are **resolved** in the current tree:
+
+| Old problem (2026-08-04) | Current state (verified 2026-08-07) |
+|---|---|
+| Fastify sidecar :3001 with duplicate/orphaned routes | **Deleted.** `Test-Path server` → `False`. No `server/` directory, no `:3001` anywhere. Single Next.js process. |
+| Main `/api/chat` was monolithic legacy, no memory/tools/CoT | **Now a thin adapter.** `src/app/api/chat/route.ts` (328 lines) validates, normalizes frames, then delegates to `runPipeline` (`src/services/chat/pipeline.ts`, 1143 lines). |
+| Three chat backends / two tool registries | **One.** `src/lib/ai/intent-router.ts` and `src/lib/ai/tools.ts` are gone (deleted). `src/lib/ai/provider.ts:27` imports `executeTool/initToolRouter` from `@/services/tools` — a single tool registry. |
+| No CoT sanitizer on main path | **Wired.** `CoTFilter` streams every model response in `pipeline.ts` (`streamThrough`, line 466). |
+| No tasks/math/web/news/maps/unit tools on main path | **Present.** Pipeline routes 14 intent classes through the tool executor (see §4). |
+| Triple-layered vision caching | **Consolidated.** The chat route no longer owns a cache. `src/lib/vision/vision-cache.ts` exists but is imported **only** by `src/lib/vision/vision-manager.ts:9` — single cache authority. |
+| Pipeline unreachable from UI | **Reachable.** `/api/chat` → `runPipeline` is the live product path. |
+| Sidecar scheduler | Replaced by in-process automation: `src/instrumentation.ts` calls `startTaskAutomation()` (Next.js `register()`, nodejs runtime). |
+
+Remaining items from the old report that still apply (unchanged): system prompt is still the ~14.5 KB `DEFAULT_SYSTEM_PROMPT` (every model call), conversations are not persisted server-side, and memory/task stores are JSON files without locking.
+
+---
+
+## 3. Architecture overview (current)
+
+Single Next.js (App Router) process. Everything runs in-process; no external services other than the AI providers and local CLI tools (Ollama, Whisper, Piper).
 
 ```
 Browser
- ├─ useVoice (wake word) → speechSynthesis / webkitSpeechRecognition
- ├─ conversationManager (client.ts)
- │    ├─ classifyToolIntent(prompt)          ← client-side intent guess
- │    ├─ classifyVisionIntent / Depth(prompt) ← decides frame attach
- │    ├─ browser tools: getSystemClock / getBatteryInfo / requestGeolocation
- │    └─ POST /api/chat (SSE)  →  Next.js :3000
- ├─ visionService → POST /api/vision/live (YOLO loop, 350ms) → Next :3000
- └─ metrics panel  → EventSource /api/metrics/events            → Next :3000
+ ├─ useVoice (SpeechRecognition + pause/resume controller)
+ ├─ conversation store → POST /api/chat (SSE)   → Next.js :3000
+ ├─ live-vision-client → POST /api/vision/live  → Next.js :3000
+ ├─ metrics panel      → GET /api/metrics/*     → Next.js :3000
+ └─ dashboard pages    → /api/memory/*, /api/tasks*, /api/owner/*, /api/settings/*
 
-Next.js :3000 (App Router) — what the UI actually uses
- ├─ /api/chat            → monolithic: old intent-router + system-tools +
- │                         vision-manager + Gemma structured analysis +
- │                         own visionCache + SSE framing. NO pipeline.
- ├─ /api/vision/live     → live-vision-engine (YOLO) singleton
- ├─ /api/vision/analyze  → aiService.analyzeCameraFrame (Gemma)
- ├─ /api/stt/transcribe  → whisper CLI / Deepgram
- ├─ /api/tts/speak       → piper
- ├─ /api/metrics/*       → metrics store (globalThis)
- └─ /api/settings/*, /api/owner/*, /api/models/*, /api/health/*
-
-Fastify :3001 (sidecar) — orphaned, nothing in the UI calls it
- ├─ /api/assistant/message → runPipeline (new architecture, unused)
- ├─ /api/conversation/*    → THIRD hand-rolled intent resolver
- ├─ /api/vision/analyze|ocr→ duplicate of Next route (dead)
- ├─ /api/stt/transcribe    → duplicate of Next route (dead)
- ├─ /api/tts/speak         → duplicate of Next route (dead)
- └─ /health
+Next.js process
+ ├─ /api/chat        → normalizeFrames → runPipeline (planner → tools → memory → CoT filter → SSE)
+ ├─ /api/vision/live → live-vision-engine (YOLOv8n + ByteTrack-lite), single session
+ ├─ /api/vision/analyze → aiService.analyzeCameraFrame (Gemma 3, Ollama-only, no cloud fallback)
+ ├─ /api/stt/transcribe → Whisper CLI/server or Deepgram
+ ├─ /api/tts/speak      → Piper (CLI/server) ; /api/tts/status
+ ├─ /api/chat        ; /api/models ; /api/health ; /api/health/test
+ ├─ /api/metrics/summary | events
+ ├─ /api/memory  (+ [id], [id]/approve, clear, context, privacy)
+ ├─ /api/owner/profile ; /api/settings/provider
+ └─ src/instrumentation.ts → startTaskAutomation() (in-process task scheduler)
 ```
 
-### The "new" pipeline (unused by UI)
-`src/services/chat/pipeline.ts` — Context Engine → Intent Planner (`classifyPlanIntent`) → Tool Router (`src/services/tools/*`, timeout+retry+cache) → Memory Engine → Reasoning (`CoTFilter` streaming sanitizer). Supports 14+ intents incl. calculator, unit-conversion, currency, web-search, news, maps, memory, tasks, system-status.
+### 3.1 Chat pipeline (`src/services/chat/pipeline.ts`)
 
-## 3. Core problems (ranked)
+Contract (from header comment): every request is classified into one of 14 classes before any model call; any class with an available tool must not be answered by the LLM until the tool succeeds; failures degrade to typed events; chain-of-thought is stripped in-flight; no component throws.
 
-| # | Problem | Files | Impact |
-|---|---------|-------|--------|
-| 1 | Main chat path has **no memory** | `src/app/api/chat/route.ts` never touches `memoryService`; `buildOwnerContext/appendMemoryContext` only used by pipeline path | JARVIS forgets everything in the UI; the memory feature works only in the unused Fastify path |
-| 2 | **Three chat backends**, two classifiers | `/api/chat` (old `intent-router`), `/api/assistant` (planner), `/api/conversation` (own resolver) | Same prompt → different routing depending on entry point. "2+2" = LLM on main path, `calculate` tool on pipeline path |
-| 3 | **Two tool registries** | `src/lib/ai/tools.ts` (4 memory/time tools, string-JSON output, used by `provider.ts:770`) vs `src/services/tools/*` (8+ tools, structured, used by pipeline + tasks) | Divergent tool behavior; provider function-calling uses the wrong/older registry; main path passes **no tools at all** so both are unreachable from the UI |
-| 4 | **Client/server intent duplication** | `client.ts:174` runs `classifyToolIntent` + `classifyVisionIntent/Depth`, then `route.ts:356` runs them again | Two regex engines with drift risk; client guesses intent the server re-derives |
-| 5 | **No CoT sanitizer on main path** | `CoTFilter`/`sanitizeFinalAnswer` only in `pipeline.ts`; `/api/chat` streams `aiService.streamText` raw | If a reasoning model emits `<thinking>` tags they leak to the UI on the main path |
-| 6 | **No tasks/math/web/maps/news/unit tools on main path** | main path only: system-clock, geolocation, battery, weather, vision | "remind me", "search the web", "how many ounces in a liter" all fall to the bare LLM |
-| 7 | **Three layered vision caches** | `vision-state` (YOLO, globalThis), `vision-manager` Scene Cache (300ms freshness), chat route's own `visionCache` + `cachedVisionPlan` (1s + 250ms skew) + `activeVisionController` | Conflicting freshness rules, redundant analysis, hard to reason about |
-| 8 | **Two processes, two sets of singletons** | Next:3000 vs Fastify:3001 each instantiate their own vision/memory/context/task/metrics state | State silently diverges; Fastify's copies are wasted |
-| 9 | **Fastify dead code** | stt/tts/vision routes duplicate Next paths the UI uses | Maintenance burden; confusing duplicate endpoints |
-| 10 | **Conversations not persisted** | conversation-store is Zustand-only; no server storage | History lost on reload; nothing feeds back into memory |
-| 11 | **Huge system prompt every call** | `DEFAULT_SYSTEM_PROMPT` ≈ 14.5 KB ≈ 3.5–4.5k tokens sent on every request | Token cost + slower first token on local Ollama |
+Flow: language detection (`detectLanguage`, deterministic) → `planRoute` (planner) → route kind `direct | naturalize | llm` → gates (unverified-factual LLM refusal, geolocation/battery denials, vision) → tool execution via `executeTool` → verified facts injected as system block → `CoTFilter` streaming → `finish()` emits `source` + `done`, records a hallucination-monitor trace.
 
-## 4. What's good (keep as-is)
+Response sources tagged per request: `tool | memory | vision | reasoning | hybrid`.
 
-- **`src/lib/vision/vision-manager.ts`** — the canonical vision gateway: cache-first, Gemma only for complex/OCR, hard refusal when no camera/frame (never lets the LLM guess). The chat route already delegates here.
-- **`src/lib/vision/vision-answer.ts`** — YOLO-cache answering with confidence bands (80+/70–79/<70) and anti-hallucination flags.
-- **`src/lib/vision/live-vision-engine.ts`** — YOLO + ByteTrack-lite + frame dedupe, per-stage timings.
-- **`src/services/tools/*`** — structured registry, executor with timeout/retry/cache, 8+ implementations.
-- **`src/services/planner/*`** — deterministic intent planner with `VerifiedFact` and direct/naturalize/llm route kinds, tested.
-- **`src/services/reasoning/sanitizer.ts`** — streaming CoT filter (just not wired to the main path).
-- **`src/services/tasks/*`**, **`src/services/context/*`**, **`src/lib/memory/*`** — JSON-backed, poll-based, sound.
-- **`src/lib/ai/system-tools.ts`** (clock/weather, WMO codes, timeouts), **errors.ts** (provider mapping), **config.ts**, **local-tools.ts**, **metrics.ts** (globalThis store), SSE framing in `route.ts`.
+### 3.2 SSE contract (`src/app/api/chat/route.ts`)
 
-## 5. Recommended architecture
+Events emitted by the adapter's `toSSE` (route.ts:98):
+- `event: vision_state` → `{ phase }`
+- `event: vision` → `{ vision: summary }`
+- `event: tool` → `{ intent, tool, latencyMs, ok, fallbackReason }`
+- `data: { token }` (streamed text) and `data: { done: true }`
+- `event: error` → `{ error }`
+- `kind: fact | plan | source` pipeline events are intentionally dropped from the wire.
 
-One canonical chat pipeline; everything else becomes a thin adapter.
+Frame normalization (route.ts:59): strips data-URL prefixes, caps at 3 frames, then **sorts by descending encoded size** — for fixed resolution the largest JPEG is assumed sharpest, so `frames[0]` (used for YOLO refresh + Gemma) is the best-quality candidate, not merely the newest.
 
-```
-Browser (client.ts)
- ├─ classifyVisionIntent/Depth ONLY (needed pre-request to attach frames)
- ├─ browser-only facts (geolocation/battery — cannot be fetched server-side)
- └─ POST /api/chat (SSE) → Next :3000
+Abort handling is dual-wired (route.ts:241): `request.signal` → `AbortController`, plus the SSE stream's `cancel()` → `requestAbort.abort()`, because Next route-handler `request.signal` does not reliably fire on client disconnect.
 
-Next /api/chat  →  THIN ADAPTER (≈150 lines)
-   validate body → browser-facts passthrough → runPipeline(...)
-   → map pipeline events → existing SSE frames (token/status/vision/tool/done)
+---
 
-src/services/chat/pipeline.ts  ← single source of truth
-   Intent Planner (planner) ──> vision-manager (complex/OCR → Gemma)
-          │                    system tools (clock/weather/location/battery)
-          ├─> Tool Router (math/memory/tasks/web/news/maps/system/tasks)
-          ├─> Memory Engine (buildOwnerContext/appendMemoryContext)
-          └─> Reasoning (CoTFilter streaming)
-```
+## 4. AI layer (`src/lib/ai/`)
 
-- **Planner becomes the single intent classifier.** Fold the 7 old intents into `classifyPlanIntent` (or make `intent-router.ts` a thin alias). Delete the duplicated classifiers.
-- **Legacy tools → new registry.** Migrate `get_current_time/search_memory/list_memories/remember` into `src/services/tools/implementations`; point `provider.ts:770` at the new executor; delete `src/lib/ai/tools.ts`.
-- **Vision cache authority = vision-manager.** Move the chat route's `visionCache`/`cachedVisionPlan`/`activeVisionController`/skew logic into the manager so the 300ms/1s/skew rules collapse into one.
-- **Fastify sidecar** → keep `index.ts` + `assistant.ts` (pipeline) for optional headless use; delete `conversation.ts`, and the duplicate `stt/tts/vision` routes. If the sidecar isn't used at all, drop it and run the pipeline in the Next process (it's just TS modules — no HTTP hop needed).
+### 4.1 Provider routing (`provider.ts`)
 
-## 6. File changes
+- Static `PROVIDER_PRIORITY` (provider.ts:40): `["gemini", "ollama", "openai", "anthropic"]`. Used for health checks and as the base ordering.
+- Runtime request order (`orderedCandidates`, provider.ts:244): **Ollama is always moved to the front** for both reasoning and vision routes; the remaining configured, non-cooldown providers follow in priority order. Effective per-request order: `ollama → gemini → openai → anthropic` (subject to configured + not-in-cooldown). Code comment confirms this is intentional ("Local Ollama is always tried first").
+- Per-role model hints for Ollama via `roleModelName` (router.ts): reasoning → `QWEN3_MODEL`, vision → `GEMMA3_MODEL`.
+- **Frame analysis is Gemma 3 / Ollama-only** (`analyzeCameraFrame`, provider.ts:459): no cloud fallback by design, so an unavailable Gemma 3 never gets replaced by a model that could hallucinate visual details. Errors instruct `ollama pull gemma3:4b`.
+- Cloud providers each have their own default model if unset (config.ts): Gemini `gemini-2.0-flash`, OpenAI `gpt-4o-mini`, Anthropic `claude-3-5-sonnet-latest`, Ollama `OLLAMA_MODEL` or `qwen3:latest`.
 
-**Delete / fold**
-| File | Reason |
-|---|---|
-| `server/routes/conversation.ts` | Third resolver, orphaned |
-| `server/routes/stt.ts`, `tts.ts`, `vision.ts` | Dead duplicates of Next routes |
-| `src/lib/ai/tools.ts` | Legacy registry; 4 tools migrate to `src/services/tools` |
-| `src/lib/ai/intent-router.ts` | Superseded by planner |
-| `src/lib/vision/vision-cache.ts` (+ cache logic in chat route) | Fold into vision-manager |
+### 4.2 Failure handling & cooldown
 
-**Modify**
-| File | Change |
-|---|---|
-| `src/app/api/chat/route.ts` | Reduce to thin SSE adapter over `runPipeline` (907 → ~150 lines) |
-| `src/services/chat/pipeline.ts` | Add vision hook (resolveVisualQuestion) + browser-facts passthrough; emit SSE-compatible events; keep Context/Memory/Reasoning |
-| `src/services/planner/planner.ts` | Absorb system-clock/geolocation/weather/battery/ocr/vision intents (single classifier) |
-| `src/lib/ai/client.ts` | Drop `classifyToolIntent`; keep vision classify for frame attach; shared browser-facts helper |
-| `src/lib/ai/provider.ts:770` | Use new Tool Router executor |
-| `src/services/tools/implementations/memory.ts` | Add `get_current_time` (or reuse `time`) |
+- Health cache `HEALTH_CACHE_MS = 10_000` (provider.ts:47).
+- Failure cooldown (provider.ts:215): `AUTH_FAILED` / `QUOTA_EXCEEDED` → 5 minutes; any other error → 30 seconds. Success clears the entry.
+- Metrics: every attempt tracked (provider, model, status `ok|error|timeout|aborted`, TTFT, chars, tokens, error code). Used by the metrics dashboard.
 
-**Keep unchanged**
-`src/services/tools/*`, `src/services/planner/*`, `src/services/reasoning/*`, `src/services/tasks/*`, `src/services/context/*`, `src/lib/memory/*`, `src/lib/vision/{vision-manager,vision-answer,live-vision-engine,vision-state,vision-intent,confidence,ocr}`, `src/lib/ai/{system-tools,errors,config,logger,local-tools,vision-intent}`, `src/lib/metrics/*`, Next `vision/live` + `vision/analyze` routes, all tests.
+### 4.3 Tool orchestration
 
-## 7. Performance / latency / token / memory estimates
+`runToolLoop` (provider.ts:743) — bounded agent loop for model tool-calling requests (`options.tools` set): hands model tool calls to the local registry (`executeTool`, `src/services/tools/executor.ts`), feeds JSON results back, up to `maxToolIterations` (default 4, configurable via `AI_MAX_TOOL_ITERATIONS`). Only engaged when tools are requested; default chat/vision paths are untouched.
 
-**Latency (per request)**
-| Path | Now | After |
+### 4.4 Memory injection
+
+- Text/stream paths prepend `DEFAULT_SYSTEM_PROMPT` and call `memoryService.buildContext()` → `appendMemoryContext` (provider.ts:276). Vision requests get a memory prompt prefix (provider.ts:285).
+- Pipeline separately queries approved memories relevant to the prompt (`memoryContextBlock`, pipeline.ts:170).
+
+### 4.5 Prompts (`prompts.ts`, 387 lines)
+
+- `DEFAULT_SYSTEM_PROMPT` (~14.5 KB, pipeline.ts imports it): strict rules — never invent facts, verified-data-only system facts, no filler/greetings, <100 words, respond in the user's language.
+- `languageInstruction(language)` — injected when the user speaks Hindi/Hinglish: respond fully in that language, never translate, translate wording not facts/numbers/units.
+- Canned localized denials: geolocation, battery, weather, unverified-fact, tool-unavailable replies.
+
+---
+
+## 5. API surface (19 route handlers)
+
+| Route | Purpose | Notes |
 |---|---|---|
-| Simple vision (YOLO cache hit) | ~0.5–1s | unchanged (no LLM) |
-| Simple vision (fresh capture + YOLO) | ~1s | unchanged |
-| Complex vision (Gemma→Qwen, 2 LLM calls) | cloud 2–4s, local 6–20s | unchanged (still 2 grounded calls) |
-| Text, cloud (gemini priority) | TTFT ~0.5–2s, total 2–10s | ~same; less prompt → faster TTFT |
-| Text, local Ollama Qwen3 | TTFT 1–5s, total 5–40s | faster TTFT once prompt shrinks |
-| Tool intents (clock/weather/math) | LLM round-trip on main path today | direct tool → sub-second, LLM only to naturalize |
+| `POST /api/chat` | Chat SSE / non-stream | Delegates to `runPipeline`; see §3.2 |
+| `POST /api/vision/live` | Live vision session (YOLO) | Only consumer: `src/lib/vision/live-vision-client.ts` |
+| `POST /api/vision/analyze` | One-shot frame analysis | `aiService.analyzeCameraFrame` (Gemma 3) |
+| `POST /api/stt/transcribe` | Speech-to-text | Whisper CLI/server or Deepgram |
+| `POST /api/tts/speak` | Text-to-speech | Piper CLI/server |
+| `GET /api/tts/status` | TTS capability status | |
+| `GET /api/health` | Provider/STT/TTS health | 10s cached, includes capabilities |
+| `GET /api/health/test` | Health diagnostics | |
+| `GET /api/models` | List models from active provider | **DEAD — no client code calls it** (zero refs to `/api/models` in `src/`) |
+| `GET/POST /api/settings/provider` | Runtime API key management | Uses registry (`setRuntimeKey`/`clearRuntimeKey`) |
+| `GET /api/metrics/summary` | Metrics aggregates | |
+| `GET /api/metrics/events` | Metrics stream (EventSource) | |
+| `GET/POST/DELETE /api/memory` | Memory entries CRUD | JSON file backend |
+| `GET/PUT/DELETE /api/memory/[id]` | Single memory entry | |
+| `POST /api/memory/[id]/approve` | Approval workflow | |
+| `DELETE /api/memory/clear` | Clear memory | |
+| `GET /api/memory/context` | Memory context for LLM | |
+| `GET/POST /api/memory/privacy` | Privacy settings | `data/memory/privacy.json` |
+| `GET/PUT /api/owner/profile` | Owner profile | `data/memory/profile.json` |
 
-**Tokens**
-- System prompt ≈ 3.5–4.5k tokens per call today. Trim to essentials (move rules into tool schemas); target <1.5k.
-- Every call resends full history (stateless). Consider capping history length per turn.
-- Complex vision = Gemma (structured) + Qwen (naturalize): expected, but the injected structured JSON should stay compact (300–800 tokens).
-- Memory context append: 500–2k tokens; cap by relevance (already partially done in memory/context).
+**Confirmed dead route:** `/api/models`. No `src/` code references it (grep `"/api/models"` → no matches). Its handler (`aiService.listModels`) works, but nothing fetches it.
 
-**Memory**
-- JSON stores (memory, tasks) are tiny. Metrics store capped at 500. Live vision holds one frame (~100–500 KB base64) + detections — fine. ONNX session ~tens of MB. No changes needed.
+---
 
-## 8. Risks
+## 6. Vision subsystem (`src/lib/vision/`)
 
-1. **SSE contract drift** — pipeline events differ from the client's parser. The adapter must emit exactly `token / status / vision / vision_state / tool / done / error` frames, or client.ts breaks.
-2. **Browser-only tools** — geolocation + battery need browser permission APIs; they cannot move server-side. Keep the narrow client facts channel and validate it in the pipeline.
-3. **Vision freshness guarantee** — the "new frame in, stale answer" prevention lives in the chat route today; moving it into vision-manager must preserve the 250ms skew + 1s stale rules.
-4. **CoT filter on the stream** — must hold across chunk boundaries (pipeline already does; verify end-to-end once wired).
-5. **Test compatibility** — `intent-router.test.ts` and `planner.test.ts` both exist; keep both green during transition, delete the old one after.
-6. **Two-process state** — until the sidecar is dropped, remember the UI only reads Next-process singletons.
+- `live-vision-engine.ts` — YOLOv8n (onnxruntime-node) + ByteTrack-lite tracker + frame dedupe, per-stage timings. Backs `/api/vision/live` as a singleton session.
+- `live-vision-client.ts` — the **only** caller of `/api/vision/live`. Verified constants: `CAPTURE_INTERVAL_MS = 350`, `MIN_SUBMIT_GAP_MS = 250`, `FORCE_RESYNC_MS = 2000`, `LIVE_VISION_STALE_MS = 1000`, `LIVE_VISION_RESULT_TTL_MS = 5000`, ~200 ms debounce.
+- `vision-manager.ts` — canonical cache-first gateway; Gemma 3 only for complex/OCR; hard refusal when no camera/frame (never lets the LLM guess). Imports `vision-cache.ts` (the single cache).
+- `vision-answer.ts` — YOLO-cache answering with confidence bands (80+/70–79/<70) and anti-hallucination flags.
+- `vision-intent.ts` — `classifyVisionDepth` for pre-request depth decisions.
+- `frame-diff.ts`, `ocr.ts`, `confidence.ts`, `debug-frame.ts`, `detect/` (`yolo-detector`, `tracker`, `postprocess`, `colors`, `coco-classes`).
+- `live-vision-session.ts` — session state for live camera loop.
+- Server pipeline route `src/services/chat/vision.ts` (`resolveVisionPlan`) grounds visual questions in captured frames with a strict answer/refusal model.
 
-## 9. Suggested order of work
+---
 
-1. Wire `/api/chat` to `runPipeline` with an SSE adapter (keeps current behavior, gains memory + CoT + tools). Verify `npm run typecheck`, `npm test`, manual UI chat.
-2. Fold old intents into planner; delete `intent-router.ts` + old tests.
-3. Migrate legacy tools into the new registry; delete `src/lib/ai/tools.ts`.
-4. Consolidate vision caching into vision-manager.
-5. Delete Fastify dead routes / sidecar.
-6. Shrink system prompt; cap history.
+## 7. Memory, tasks, context, metrics
+
+### 7.1 Memory (`src/lib/memory/` + `data/memory/`)
+
+- Backend: `json-file-repository.ts` — `data/memory/profile.json` (1,448 B), `data/memory/entries.json` (334 B), `data/memory/privacy.json` (70 B).
+- `memory-service.ts` + `repository.ts` — entry lifecycle with an **approval workflow** (`status: pending → approved`), categories, search.
+- `sanitize.ts`, `context.ts` (`buildContext`), `client.ts` (browser helper), `types.ts`.
+- **No file locking** — concurrent writes to the same JSON file can clobber each other. Low risk today (single process, low volume), but it is the most fragile persistence point.
+
+### 7.2 Tasks (`src/services/tasks/` + `data/tasks/`)
+
+- `engine.ts` (task-engine), `scheduler.ts`, `repository.ts`. `data/tasks/tasks.json` is empty (2 B).
+- Started in-process by `src/instrumentation.ts` → `startTaskAutomation()`; there is no external scheduler.
+
+### 7.3 Context (`src/services/context/`)
+
+- `context-engine.ts` (in-process singleton, `isRunning()`, `getAwareness()`), `system-collector.ts`, `types.ts`. The pipeline prepends a verified time/date block (TimeService) plus an optional live environment snapshot.
+
+### 7.4 Metrics (`src/lib/metrics/`)
+
+- `metrics.ts` — globalThis store, capped (per earlier audits at 500 samples), typed attempt records.
+- `client-stats.ts` — browser-collected stats. `/api/metrics/summary` + `/api/metrics/events` (SSE) read the store.
+
+### 7.5 Time (`src/lib/time/time-service.ts`)
+
+- `getSystemClock()` is the single verified clock source injected into every pipeline reasoning/naturalize request (pipeline.ts:124 `awarenessBlock`); `formatTimeIn`/`formatDateIn` localize time/date to English/Hindi/Hinglish.
+
+---
+
+## 8. Voice subsystem
+
+### 8.1 Lifecycle (`src/lib/voice/lifecycle.ts` + `src/hooks/use-voice.ts`)
+
+Recent work added `VoiceSessionController`: single live session enforcement, `pause()`/`resume()`, auto-reconnect on end, start timeout (3 s), stale-session watchdog (15 s, 2 s tick), forced reset with 500 ms grace, lifecycle events + console logs. `use-voice.ts` ties TTS start → `pause()`, TTS end → `resume()`, drops transcripts while paused, and exposes `{ state, startListening, stopListening, speak, setContinuousMode, resumeContinuousMode, isSttSupported }`. Verified by `tests/voice-lifecycle.test.ts` (8 tests), including a 20-consecutive-turn no-self-trigger/no-freeze case. This resolves the two previously reported bugs (TTS re-trigger echo loop; mic freeze after 2–3 turns).
+
+### 8.2 STT (`src/lib/stt.ts`, `src/lib/ai/whisper.ts`, `/api/stt/transcribe`)
+
+- Browser path: `isSpeechRecognitionSupported()` / `webkitSpeechRecognition`.
+- Server path: Whisper CLI or `WHISPER_SERVER_URL`, falling back to Deepgram (`DEEPGRAM_API_KEY`). MediaRecorder chunk cap ~20 s. `whisper`/`deepgram` appear 95× in `src/`.
+
+### 8.3 TTS (`src/lib/ai/piper.ts`, `src/lib/tts.ts`, `/api/tts/*`)
+
+- Piper CLI (`PIPER_COMMAND`, default voice `en_US-lessac-medium`) or `PIPER_SERVER_URL`, with browser `speechSynthesis` as fallback. `TTS_MODE`/`STT_MODE` env knobs (`auto|piper|browser` and `auto|whisper|deepgram|browser`).
+
+### 8.4 Lang (`src/lib/lang/`)
+
+- `detect.ts` (deterministic English/Hindi/Hinglish detection, <5 ms) and `replies.ts` (localized canned replies) used throughout the pipeline.
+
+---
+
+## 9. UI / pages / stores
+
+### 9.1 Pages (10)
+
+`/` (landing), `/dashboard`, and `/dashboard/{calendar,conversations,memory,metrics,profile,settings,tasks,vision}`.
+
+### 9.2 Components (`src/components/`)
+
+- `layout/sidebar.tsx`, `voice/voice-interface.tsx`, `vision/vision-interface.tsx`, `vision/vision-debug-overlay.tsx`, `vision/vision-status-bar.tsx`, `command-palette/command-palette.tsx`, `landing/glowing-orb.tsx`, `ui/{button,input,textarea,select,switch,badge,glass-card}.tsx`.
+
+### 9.3 Stores (`src/stores/`)
+
+4 Zustand stores: `app-store`, `conversation-store`, `vision-store`, `voice-store`. Each is scoped to its feature; no cross-store import cycles found. Conversations are store-only (not persisted server-side — unchanged from the old audit).
+
+### 9.4 Camera (`src/lib/camera/`)
+
+`camera-service.ts`, `frame-worker.ts` (capture loop + worker), `enhance.ts`, `index.ts`, `types.ts`; integrated with the vision store/permission flow.
+
+---
+
+## 10. Config, environment, security
+
+### 10.1 `.env` (17 variables) and their actual usage in `src/`
+
+| Variable | Refs in `src/` | Status |
+|---|---|---|
+| `GEMINI_API_KEY` | 6 | Used |
+| `OPENAI_API_KEY` | 4 | Used |
+| `ANTHROPIC_API_KEY` | 4 | Used |
+| `OLLAMA_BASE_URL` | 1 (`config.ts:91`) | Used (default `http://localhost:11434`) |
+| `DEEPGRAM_API_KEY` | 4 | Used (STT fallback) |
+| `GEMINI_MODEL` / `OPENAI_MODEL` / `ANTHROPIC_MODEL` | config defaults | Used |
+| `OLLAMA_MODEL` / `QWEN3_MODEL` / `GEMMA3_MODEL` | 1 / 1 / 3 | Used (Ollama routing) |
+| `AI_VISION_TIMEOUT_MS` | 2 | Used (default 300,000) |
+| `ELEVENLABS_API_KEY` | **0** | **DEAD** — no TTS path references it (TTS is Piper/browser only) |
+| `DATABASE_URL` | **0** | **DEAD** — no DB layer (JSON file backend) |
+| `REDIS_URL` | **0** | **DEAD** — no Redis anywhere |
+| `PORT` | **0** (`process.env.PORT` not referenced) | **UNUSED in code** — Next.js default port applies |
+| `NODE_ENV` | standard | Used by Next.js |
+
+Config knobs read by `src/lib/ai/config.ts` that are **not** present in `.env` (defaults apply): `AI_REQUEST_TIMEOUT_MS`, `AI_HEALTH_TIMEOUT_MS`, `AI_MAX_TOOL_ITERATIONS`, `STT_MODE`, `WHISPER_ENABLED`, `WHISPER_COMMAND`, `WHISPER_SERVER_URL`, `WHISPER_MODEL`, `WHISPER_LANGUAGE`, `TTS_MODE`, `PIPER_ENABLED`, `PIPER_COMMAND`, `PIPER_SERVER_URL`, `PIPER_VOICE`. A `.env.example` exists (2,323 B) documenting the surface.
+
+### 10.2 Security
+
+- **No hardcoded secrets in `src/`** — scanned for `AIza…`, `sk-…`, `sk-ant-…`, `Bearer`, `AKIA…`: no matches.
+- `.env` and `data/` are gitignored. `.env` contains live API keys (Gemini, OpenAI, Anthropic, Deepgram) but is excluded from version control.
+- Runtime key override supported via `/api/settings/provider` → `registry.ts` (in-memory only, rebuilds providers).
+- **No TODO/FIXME/HACK/XXX/`@ts-ignore`/`@ts-expect-error`/`eslint-disable` in `src/`.** The six grep "matches" for TODO are false positives — the substring `todo` inside intent regexes (`(?:task|reminder|todo|to-do|alarm|event)` in `pipeline.ts:293`, `intents.ts:231/236`) and the word "stories" in `web.ts:226-229`; none are actual annotations.
+- `console.log` (plain, non `info/warn/error`) in `src/`: none found. All logging goes through `aiLogger`.
+
+### 10.3 Dependency vulnerabilities (`npm audit`, 2026-08-07)
+
+**13 vulnerabilities: 3 moderate, 9 high, 1 critical.**
+
+- **critical** — `vitest` (via `vite`)
+- **high** — `next` (chain via `postcss` etc.), `glob`, `js-yaml`, `postcss`, `onnxruntime-node` (via `adm-zip`), `vite`, `eslint-config-next` / `@next/eslint-plugin-next`
+- **moderate** — `esbuild`, `vite-node` / `@vitest/mocker` (via `vite`)
+
+Most are dev-only (vitest/vite/esbuild/eslint toolchain); `next` and `onnxruntime-node` are runtime-relevant. No fix versions were reported as applied; this is informational — nothing was changed.
+
+---
+
+## 11. Notable findings (summary)
+
+**Dead / unused**
+1. `/api/models` route — zero callers in `src/`.
+2. `.env` → `ELEVENLABS_API_KEY`, `DATABASE_URL`, `REDIS_URL`, `PORT` — zero references in code.
+3. `server/` (Fastify sidecar) — already removed; references to it in `audit.md`/`performance.text` are stale.
+
+**Fragility**
+4. Memory/task JSON stores have no locking — concurrent writes can clobber. Low risk at current volume.
+5. Conversations are not persisted server-side — history is Zustand-only, lost on reload.
+6. `DEFAULT_SYSTEM_PROMPT` (~14.5 KB ≈ 3.5–4.5k tokens) is sent on every model call.
+
+**Positive (verified)**
+7. Single-process architecture; pipeline is the one chat path; single tool registry; single vision-cache authority; CoT filtering on every stream; localized responses (EN/HI/Hinglish); measured/hallucination-monitored responses; dual-abort SSE wiring; hardened voice lifecycle (self-trigger loop + mic freeze fixed, 310 tests green).
+
+---
+
+## 12. Verification gates (all run during/after prior work, not modified today)
+
+- `npm test` → 17 files / 310 tests pass (includes new `voice-lifecycle` suite).
+- `npm run typecheck` (`tsc --noEmit`) → clean.
+- `npm run lint` → no errors or warnings.
+
+---
+
+## 13. Open items for future (informational — no action taken)
+
+1. Decide fate of `/api/models` (dead) and the four unused `.env` keys — remove or implement.
+2. Address `npm audit` critical/high findings (especially runtime `next` and `onnxruntime-node`) when a safe upgrade path exists.
+3. Optional: file-level locking for JSON memory/tasks repositories; optional server persistence for conversations.
+4. Optional: shrink `DEFAULT_SYSTEM_PROMPT` / cap context to cut token cost and TTFT on local Ollama.

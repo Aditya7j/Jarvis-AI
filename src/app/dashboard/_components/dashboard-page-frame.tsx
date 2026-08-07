@@ -11,7 +11,7 @@ export function DashboardPageFrame({
 }) {
   const sidebarOpen = useAppStore((s) => s.sidebarOpen);
   return (
-    <div className="min-h-screen bg-black">
+    <div className="min-h-screen">
       <Sidebar />
       <div
         className={cn(

@@ -35,8 +35,8 @@ export default function ConversationsPage() {
 
   return (
     <DashboardPageFrame>
-      <div className="h-screen flex flex-col">
-        <header className="border-b border-white/[0.03] bg-black/60 backdrop-blur-xl px-6 py-3 flex items-center justify-between">
+      <div className="h-dvh overflow-hidden flex flex-col">
+        <header className="hud-header px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h1 className="text-sm text-white/60">Conversations</h1>
             {!aiReady && (

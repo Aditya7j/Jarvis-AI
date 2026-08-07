@@ -52,19 +52,20 @@ export function Sidebar() {
           className="fixed left-0 top-0 h-full z-30 overflow-hidden border-r border-white/[0.05]"
         >
           <div className="w-[280px] h-full bg-black/85 flex flex-col">
-            <div className="p-4 border-b border-white/[0.05]">
+            <div className="hud-header p-4">
               <Link
                 href="/dashboard"
                 className="flex items-center gap-3 group"
               >
-                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
+                <div className="relative w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center shadow-[0_0_20px_rgba(59,130,246,0.45)]">
+                  <span className="absolute inset-0 rounded-xl border border-cyan-300/30 animate-pulse-glow" />
                   <Sparkles className="w-4 h-4 text-white" />
                 </div>
                 <div>
-                  <h2 className="text-sm font-semibold text-white/90">
+                  <h2 className="text-sm font-bold tracking-[0.18em] text-gradient text-glow">
                     JARVIS
                   </h2>
-                  <p className="text-[10px] text-white/30 tracking-widest uppercase">
+                  <p className="text-[10px] text-white/30 tracking-[0.25em] uppercase">
                     AI Operating System
                   </p>
                 </div>
@@ -81,16 +82,21 @@ export function Sidebar() {
                     className={cn(
                       "flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all duration-200 group",
                       isActive
-                        ? "bg-blue-500/10 text-blue-400 border border-blue-500/20"
+                        ? "bg-blue-500/10 text-blue-400 border border-cyan-500/20 shadow-[0_0_18px_rgba(56,189,248,0.12)]"
                         : "text-white/40 hover:text-white/70 hover:bg-white/[0.03]"
                     )}
                   >
-                    <item.icon className="w-4 h-4" />
+                    <item.icon
+                      className={cn(
+                        "w-4 h-4 transition-colors",
+                        isActive && "drop-shadow-[0_0_6px_rgba(56,189,248,0.9)]"
+                      )}
+                    />
                     <span>{item.label}</span>
                     {isActive && (
                       <motion.div
                         layoutId="activeNav"
-                        className="ml-auto w-1.5 h-1.5 rounded-full bg-blue-400"
+                        className="ml-auto w-1.5 h-1.5 rounded-full bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.9)]"
                       />
                     )}
                   </Link>
