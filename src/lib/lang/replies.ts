@@ -22,6 +22,7 @@ export type CannedReplyKey =
   | "visionFailed"
   | "noCamera"
   | "noFrame"
+  | "visionWarming"
   | "greeting"
   | "casual"
   | "howAreYou";
@@ -48,6 +49,8 @@ const ENGLISH: ReplyTable = {
     "I can't see your camera feed — no camera or screen source is connected. Turn one on and ask me again.",
   noFrame:
     "I don't have a frame to look at right now — your camera is on but no video is coming through. Give it a moment and try again.",
+  visionWarming:
+    "I just started looking — give me a second for the camera feed to come through, then ask me again.",
   greeting: "Hello! How can I help you today?",
   casual: "Got it! Let me know if you need anything else.",
   howAreYou: "I'm doing well, thank you! What can I help you with?",
@@ -73,6 +76,8 @@ const HINGLISH: ReplyTable = {
     "Main aapka camera feed nahi dekh sakta — koi camera ya screen source connected nahi hai. On karo aur dobara poochho.",
   noFrame:
     "Mere paas abhi frame nahi hai — camera on hai par video aa nahi raha. Ek second rukkar dobara try karo.",
+  visionWarming:
+    "Main abhi dekhna shuru kiya hoon — camera feed aane ke liye ek second do, phir dobara poochh lena.",
   greeting: "Hello! Aaj main aapki kya help kar sakta hoon?",
   casual: "Theek hai! Aur kuch chahiye to batao.",
   howAreYou: "Main theek hoon, shukriya! Aapko kya chahiye?",
@@ -98,6 +103,8 @@ const HINDI: ReplyTable = {
     "मैं आपका कैमरा फ़ीड नहीं देख सकता — कोई कैमरा या स्क्रीन स्रोत कनेक्ट नहीं है। इसे चालू करें और फिर से पूछें।",
   noFrame:
     "मेरे पास अभी कोई फ्रेम नहीं है — आपका कैमरा चालू है पर वीडियो आ नहीं रही। एक क्षण रुककर फिर प्रयास करें।",
+  visionWarming:
+    "मैंने अभी देखना शुरू किया है — कैमरा फ़ीड आने तक एक क्षण दीजिए, फिर दोबारा पूछिए।",
   greeting: "नमस्ते! आज मैं आपकी क्या मदद कर सकता हूँ?",
   casual: "ठीक है! और कुछ चाहिए तो बताइए।",
   howAreYou: "मैं ठीक हूँ, धन्यवाद! आपको क्या चाहिए?",

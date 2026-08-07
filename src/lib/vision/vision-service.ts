@@ -46,18 +46,16 @@ export const visionService = {
     return result;
   },
 
-  /** True when the latest live analysis is fresh enough to answer immediately. */
-  isLiveResultFresh: (source: CameraSource): boolean => {
-    const result = useVisionStore.getState().latestLiveResult;
-    if (!result) return false;
-    if (result.source !== source) return false;
-    if (result.state !== "live" || !result.summary || !result.systemContext) {
-      return false;
-    }
-    const now = Date.now();
-    if (now - result.analyzedAt > LIVE_RESULT_TTL_MS) return false;
-    if (now - result.capturedAt > LIVE_RESULT_STALE_MS) return false;
-    return true;
+  /**
+   * True when the latest live analysis is fresh enough to answer immediately.
+   * The live loop feeds the Scene Cache (vision state), not an LLM result, so
+   * freshness is judged on the cached scene rather than a `systemContext`.
+   */
+  isLiveResultFresh: (_source: CameraSource): boolean => {
+    const state = useVisionStore.getState().latestVisionState;
+    if (!state) return false;
+    if (state.frameId === 0) return false;
+    return Date.now() - state.timestamp <= LIVE_RESULT_STALE_MS;
   },
 
   getLiveAnalyzing: (): boolean => useVisionStore.getState().liveAnalyzing,
@@ -65,4 +63,35 @@ export const visionService = {
   /** Latest continuous YOLO vision-state snapshot (objects, people, colours). */
   getLiveVisionState: (): VisionStateSnapshot | null =>
     useVisionStore.getState().latestVisionState,
+
+  /**
+   * Non-blocking grab of the newest camera frame for on-demand analysis. Prefers
+   * the newest frame the server already analyzed (from the Scene Cache) so the
+   * chat round-trip never waits on capture or encode; falls back to the last
+   * frame from the live loop only if it is recent.
+   */
+  getNewestAnalysisFrame: (source?: CameraSource): VisionFrame | null => {
+    const active = source ?? cameraService.getActiveSource();
+    if (!active) return null;
+    const state = useVisionStore.getState().latestVisionState;
+    const sceneFrame = state?.latestFrame;
+    if (sceneFrame?.buffer && state) {
+      const age = Date.now() - (state.timestamp || 0);
+      if (age <= LIVE_RESULT_STALE_MS) {
+        return {
+          source: active,
+          dataUrl: sceneFrame.buffer,
+          mimeType: "image/jpeg",
+          width: sceneFrame.width,
+          height: sceneFrame.height,
+          capturedAt: sceneFrame.capturedAt,
+        };
+      }
+    }
+    const history = cameraService.getRecentFrames(active, 1);
+    const latest = history[0];
+    if (!latest) return null;
+    if (Date.now() - latest.capturedAt > LIVE_RESULT_STALE_MS) return null;
+    return latest;
+  },
 };

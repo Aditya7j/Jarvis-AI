@@ -37,10 +37,20 @@ import type { PipelineModel } from "./pipeline";
 
 const log = aiLogger.child("vision-resolution");
 
+/**
+ * Hard interactive timeout for a single Gemma frame analysis. Vision must feel
+ * conversational: if Gemma cannot answer within this window we return a direct,
+ * grounded failure instead of making the user wait through a full 15s model
+ * timeout.
+ */
+export const VISION_INTERACTIVE_TIMEOUT_MS = 8000;
+
 export interface VisionPlan {
   systemContext: string | null;
   summary: VisionAnalysisSummary | null;
   cancelled?: boolean;
+  /** Gemma exceeded the interactive timeout — answer with a direct failure. */
+  timeout?: boolean;
 }
 
 export type VisionPlanResult =
@@ -71,12 +81,17 @@ async function analyzeNewestFrame(
   const startedAt = Date.now();
   const imageBytes = Math.round(frame.image.length * 0.75);
   const debugFrame = saveDebugFrame(frame.image, frame.mimeType);
-  log.info("Frame sent to Gemma 3", {
+  log.info("[Vision] frame sent to Gemma 3", {
     width: frame.width ?? null,
     height: frame.height ?? null,
     imageBytes,
     debugFrame,
   });
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    (signal as AbortSignal & { abort?: () => void })?.abort?.();
+  }, VISION_INTERACTIVE_TIMEOUT_MS);
   try {
     const raw = await model.analyzeCameraFrame?.({
       imageBase64: frame.image,
@@ -84,19 +99,20 @@ async function analyzeNewestFrame(
       prompt: VISION_STRUCTURED_PROMPT,
       signal,
     });
+    clearTimeout(timeout);
     if (!raw) {
       const error =
         "No vision model is configured — cannot analyze the camera frame.";
-      log.error("Vision analysis failed — no vision model", { error });
+      log.error("[Vision] analysis failed — no vision model", { error });
       return { analysis: null, error };
     }
-    log.info("Gemma 3 raw response", {
+    log.info("[Vision] Gemma 3 raw response", {
       chars: raw.length,
       latencyMs: Date.now() - startedAt,
     });
     const analysis = parseVisionAnalysis(raw);
     if (analysis) {
-      log.info("Structured JSON created", {
+      log.info("[Vision] structured JSON created", {
         objects: analysis.visible_objects.length,
         personConfidence: analysis.person.confidence,
         latencyMs: Date.now() - startedAt,
@@ -104,21 +120,29 @@ async function analyzeNewestFrame(
       return { analysis, error: null };
     }
     const error = `Gemma 3 response could not be parsed as structured JSON (received ${raw.length} chars).`;
-    log.error("Vision pipeline failed — structured JSON could not be created", {
+    log.error("[Vision] structured JSON could not be created", {
       raw,
       latencyMs: Date.now() - startedAt,
     });
     return { analysis: null, error };
   } catch (error) {
+    clearTimeout(timeout);
+    if (timedOut) {
+      log.warn("[Vision] Gemma analysis timed out", {
+        timeoutMs: VISION_INTERACTIVE_TIMEOUT_MS,
+        latencyMs: Date.now() - startedAt,
+      });
+      return { analysis: null, error: "timeout" };
+    }
     const payload = toErrorPayload(error);
     if (signal?.aborted) {
-      log.info("Vision analysis cancelled (stale or aborted)", {
+      log.info("[Vision] analysis cancelled (stale or aborted)", {
         latencyMs: Date.now() - startedAt,
       });
       return { analysis: null, error: "cancelled" };
     }
     const detail = `Gemma 3 frame analysis failed: [${payload.code}] ${payload.message}`;
-    log.error("Vision pipeline failed — request to Gemma 3 errored", {
+    log.error("[Vision] request to Gemma 3 errored", {
       code: payload.code,
       message: payload.message,
       latencyMs: Date.now() - startedAt,
@@ -130,12 +154,15 @@ async function analyzeNewestFrame(
 /**
  * Runs one Gemma analysis of the newest frame under the manager-owned
  * cancellation slot (`beginVisionAnalysis`), then caches the grounded plan for
- * reuse by near-identical frames.
+ * reuse by near-identical frames. The cached entry is bound to the current
+ * camera session and analyzed frame id so it can never serve a stale answer.
  */
 async function analyzeAndCachePlan(
   frame: VisionFrameInput,
   model: PipelineModel,
-  signal?: AbortSignal
+  signal: AbortSignal | undefined,
+  cameraSessionId: string | null,
+  frameId: number
 ): Promise<VisionPlan> {
   const wf = getCurrentWaterfall();
   wf?.count("gemmaCalls");
@@ -144,6 +171,14 @@ async function analyzeAndCachePlan(
   try {
     const result = await analyzeNewestFrame(frame, model, run.signal);
     if (!result.analysis) {
+      if (result.error === "timeout") {
+        return {
+          systemContext: null,
+          summary: null,
+          cancelled: true,
+          timeout: true,
+        };
+      }
       if (result.error === "cancelled") {
         return { systemContext: null, summary: null, cancelled: true };
       }
@@ -172,6 +207,8 @@ async function analyzeAndCachePlan(
       source: frame.source ?? "webcam",
       capturedAt: frame.capturedAt ?? Date.now(),
       analyzedAt: Date.now(),
+      cameraSessionId,
+      frameId,
     });
     return { systemContext, summary };
   } finally {
@@ -208,6 +245,7 @@ export async function resolveVisionPlan(
   input: VisionPlanInput
 ): Promise<VisionPlanResult> {
   const { prompt, depth, visionState, frames, model, signal, language } = input;
+  const startedAt = Date.now();
   getCurrentWaterfall()?.count("visionCalls");
   const resolution = await resolveVisualQuestion({
     prompt,
@@ -218,15 +256,24 @@ export async function resolveVisionPlan(
   switch (resolution.kind) {
     case "cached":
     case "no-camera":
-    case "no-frame": {
+    case "no-frame":
+    case "warming": {
       let text = resolution.text;
       if (language !== "english") {
         if (resolution.kind === "no-camera") {
           text = localizeReply(language, "noCamera");
         } else if (resolution.kind === "no-frame") {
           text = localizeReply(language, "noFrame");
+        } else if (resolution.kind === "warming") {
+          text = localizeReply(language, "visionWarming");
         }
       }
+      log.info("[Vision] direct answer", {
+        kind: resolution.kind,
+        depth,
+        latencyMs: Date.now() - startedAt,
+        text: text.slice(0, 80),
+      });
       return {
         kind: "direct",
         text,
@@ -235,12 +282,42 @@ export async function resolveVisionPlan(
     }
     case "gemma": {
       const newest = resolution.frame;
-      const cached = cachedVisionPlan(newest.source, newest);
+      const cached = cachedVisionPlan(
+        newest.source,
+        newest,
+        resolution.meta.cameraSessionId
+      );
       if (cached) {
+        log.info("[Vision] reused cached Gemma plan", {
+          depth,
+          latencyMs: Date.now() - startedAt,
+        });
         return { kind: "llm", plan: withConfidenceHedge(cached) };
       }
-      const plan = await analyzeAndCachePlan(newest, model, signal);
+      const plan = await analyzeAndCachePlan(
+        newest,
+        model,
+        signal,
+        resolution.meta.cameraSessionId,
+        resolution.meta.frameId
+      );
+      if (plan.timeout) {
+        const text =
+          language === "english"
+            ? "I couldn't analyze the visual quickly enough — try again or ask something simpler."
+            : localizeReply(language, "visionFailed");
+        log.warn("[Vision] direct answer after Gemma timeout", {
+          depth,
+          latencyMs: Date.now() - startedAt,
+        });
+        return { kind: "direct", text, summary: null };
+      }
       if (plan.cancelled) return { kind: "cancelled" };
+      log.info("[Vision] resolved via Gemma", {
+        depth,
+        latencyMs: Date.now() - startedAt,
+        summary: plan.summary,
+      });
       return { kind: "llm", plan: withConfidenceHedge(plan) };
     }
   }

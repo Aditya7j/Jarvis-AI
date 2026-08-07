@@ -5,6 +5,7 @@ import { useVoiceStore } from "@/stores/voice-store";
 import { useConversationStore } from "@/stores/conversation-store";
 import { isSpeechRecognitionSupported, transcribeViaServer } from "@/lib/stt";
 import { tts, isTtsSupported } from "@/lib/tts";
+import { soundFX } from "@/lib/audio/sound-service";
 import { triggerInterrupt } from "@/lib/interrupt";
 import {
   VoiceSessionController,
@@ -119,6 +120,7 @@ export function useVoice() {
         if (wakeIndex !== -1) {
           listeningModeRef.current = false;
           setState("listening");
+          soundFX.play("wake");
           const command = transcript
             .slice(wakeIndex + WAKE_WORD.length)
             .trim();

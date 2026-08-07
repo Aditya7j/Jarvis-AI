@@ -6,6 +6,7 @@ import { useConversationStore } from "@/stores/conversation-store";
 import { useVoiceStore } from "@/stores/voice-store";
 import { conversationManager } from "@/lib/ai/conversation-manager";
 import { tts } from "@/lib/tts";
+import { soundFX } from "@/lib/audio/sound-service";
 import { registerInterruptHandler } from "@/lib/interrupt";
 import { cn } from "@/lib/utils";
 import type { AIMessage } from "@/types";
@@ -183,6 +184,7 @@ export function VoiceInterface() {
           setErrorMessage(message);
           resetStream();
           useConversationStore.getState().setState("idle");
+          soundFX.play("error");
           return;
         }
 

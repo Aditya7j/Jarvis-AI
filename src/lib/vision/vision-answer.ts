@@ -115,7 +115,7 @@ function clothingSentence(state: VisionStateSnapshot): string | null {
   const person = state.latestPeople[0];
   if (!person) return null;
   const shirt = person.shirtColor;
-  if (!shirt) return "I can see you, but I can't make out what you're wearing clearly.";
+  if (!shirt) return null;
   return `You're wearing a ${shirt.name} top.`;
 }
 
@@ -219,14 +219,21 @@ export function answerFromVisionCache(prompt: string): SimpleVisionAnswer {
 
   // --- Wearing / clothing colour ---
   if (/\bwhat\s+am\s+i\s+wearing\b|\bwearing\b|\bshirt\b|\bhoodie\b|\bjacket\b|\bwhat\s+color\b|\bcolor\s+of\b|\bclothes\b|\boutfit\b|\bclothing\b/.test(p)) {
-    const sentence = clothingSentence(state);
-    if (!sentence) {
+    const person = state.latestPeople[0];
+    if (!person) {
       return {
-        text: people > 0 ? "I can see you, but I can't make out what you're wearing clearly." : "I can't see you right now.",
+        text: "I can't see you right now.",
         confidence: 50,
         needsGemma: false,
         fromCache: true,
       };
+    }
+    const sentence = clothingSentence(state);
+    if (!sentence) {
+      // A person is visible but YOLO hasn't established a shirt colour. YOLO
+      // must never guess an attribute it didn't detect — Gemma (which can read
+      // colour from the frame) is the only allowed escalation for clothing.
+      return { text: "", confidence: 0, needsGemma: true, fromCache: false };
     }
     return finalize(sentence, 85);
   }

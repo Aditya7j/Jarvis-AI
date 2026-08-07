@@ -5,10 +5,12 @@ import { DashboardPageFrame } from "../_components/dashboard-page-frame";
 import { cn } from "@/lib/utils";
 import { GlassCard } from "@/components/ui/glass-card";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { conversationManager } from "@/lib/ai/conversation-manager";
 import { memoryClient } from "@/lib/memory/client";
+import { soundFX } from "@/lib/audio/sound-service";
 import type { HealthSummary, ProviderStatusDetail } from "@/lib/ai/types";
-import { Mic, Eye, Brain, Zap, Globe, Key, Check, ExternalLink, AlertTriangle, RefreshCw } from "lucide-react";
+import { Mic, Eye, Brain, Zap, Globe, Key, Check, ExternalLink, AlertTriangle, RefreshCw, Volume2, VolumeX, Play } from "lucide-react";
 import { formatTimestampTime } from "@/lib/time/time-service";
 
 type ProviderKey = "gemini" | "openai" | "anthropic" | "ollama";
@@ -64,6 +66,17 @@ export default function SettingsPage() {
   const [testingKey, setTestingKey] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
   const [privacyMemoryEnabled, setPrivacyMemoryEnabled] = useState(true);
+  const [soundEnabled, setSoundEnabled] = useState(soundFX.isEnabled());
+  const [soundVolume, setSoundVolume] = useState(
+    Math.round(soundFX.getVolume() * 100)
+  );
+
+  useEffect(() => {
+    return soundFX.subscribe((settings) => {
+      setSoundEnabled(settings.enabled);
+      setSoundVolume(Math.round(settings.volume * 100));
+    });
+  }, []);
 
   useEffect(() => {
     memoryClient
@@ -315,6 +328,54 @@ export default function SettingsPage() {
               </GlassCard>
             ))}
           </div>
+
+          <GlassCard className="p-5 mt-4">
+            <div className="flex items-center gap-2 mb-1">
+              <Volume2 className="w-4 h-4 text-cyan-400" />
+              <h2 className="text-sm text-white/70">Sound Effects</h2>
+            </div>
+            <p className="text-xs text-white/20 mb-4">
+              Short futuristic UI cues for wake, listening, thinking, tools,
+              vision, responses and camera. Never affects TTS or the mic.
+            </p>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <Switch
+                  checked={soundEnabled}
+                  onCheckedChange={(enabled) => soundFX.setEnabled(enabled)}
+                  label="Sound Effects"
+                  description={soundEnabled ? "Enabled" : "Disabled"}
+                />
+              </div>
+              <div className="flex items-center gap-3">
+                <VolumeX className="w-4 h-4 text-white/30 shrink-0" />
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={soundVolume}
+                  disabled={!soundEnabled}
+                  onChange={(e) =>
+                    soundFX.setVolume(Number(e.target.value) / 100)
+                  }
+                  aria-label="Sound volume"
+                  className="flex-1 accent-cyan-500 disabled:opacity-30"
+                />
+                <span className="text-xs text-white/50 tabular-nums w-10 text-right">
+                  {soundVolume}%
+                </span>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => soundFX.play("wake")}
+                  disabled={!soundEnabled}
+                >
+                  <Play className="w-3.5 h-3.5 mr-1" />
+                  Test
+                </Button>
+              </div>
+            </div>
+          </GlassCard>
 
           {providerErrors.length > 0 && (
             <GlassCard className="p-5 mt-4 border-red-500/10">

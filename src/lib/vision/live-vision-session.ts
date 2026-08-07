@@ -21,8 +21,8 @@ import { frameFingerprint } from "./frame-diff";
  * it so the UI and the chat fast-path can read partial/current results without
  * waiting on Gemma 3.
  */
-const CAPTURE_INTERVAL_MS = 350;
-const MIN_SUBMIT_GAP_MS = 250;
+const CAPTURE_INTERVAL_MS = 150;
+const MIN_SUBMIT_GAP_MS = 100;
 const FORCE_RESYNC_MS = 2000;
 
 class LiveVisionSession {
@@ -51,6 +51,7 @@ class LiveVisionSession {
     void stopLiveSession().catch(() => {});
     const store = useVisionStore.getState();
     store.setLatestLiveResult(null);
+    store.setLatestVisionState(null);
     store.setLiveAnalyzing(false);
   }
 

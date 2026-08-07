@@ -7,6 +7,10 @@ import type {
  * Reuse the latest analyzed frame for VISION_CACHE_TTL_MS instead of
  * re-running Gemma 3 on near-identical frames.
  *
+ * Every entry is bound to the camera session that produced it. Closing the
+ * camera (or starting a new one) assigns a fresh session id, so stale answers
+ * from a previous session can never be served to the new one.
+ *
  * Next.js App Router compiles each route handler into its own bundle, so
  * module-scoped singletons are NOT shared between `/api/chat`, `/api/vision/live`
  * and the Fastify server. The cache lives on `globalThis` (shared per process)
@@ -22,6 +26,10 @@ export interface CachedVisionResult {
   source: "webcam" | "screen";
   capturedAt: number;
   analyzedAt: number;
+  /** Owning camera session. Entries from another session are never reused. */
+  cameraSessionId: string | null;
+  /** Monotonic frame id this analysis was produced from. */
+  frameId: number;
 }
 
 const STORE_KEY = "__jarvis_vision_cache__";
@@ -45,11 +53,20 @@ function getStore(): VisionCacheStore {
 }
 
 class VisionCache {
-  /** Returns the cached result only if it is fresh and matches the source. */
-  get(source?: "webcam" | "screen"): CachedVisionResult | null {
+  /**
+   * Returns the cached result only if it is fresh, matches the source, and was
+   * produced by the given camera session (strict equality — a closed/reopened
+   * camera gets a new session id, so its answers are invisible to this lookup).
+   */
+  get(
+    source?: "webcam" | "screen",
+    cameraSessionId?: string | null
+  ): CachedVisionResult | null {
     const entry = getStore().entry;
     if (!entry) return null;
     if (source && entry.source !== source) return null;
+    if (cameraSessionId !== undefined && entry.cameraSessionId !== cameraSessionId)
+      return null;
     if (Date.now() - entry.analyzedAt > VISION_CACHE_TTL_MS) return null;
     return entry;
   }

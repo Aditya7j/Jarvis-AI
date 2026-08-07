@@ -7,6 +7,7 @@ import { useVisionStore } from "@/stores/vision-store";
 import { cameraService } from "@/lib/camera";
 import type { CameraSource } from "@/lib/camera";
 import { liveVisionSession } from "@/lib/vision/live-vision-session";
+import { soundFX } from "@/lib/audio/sound-service";
 import { VisionDebugOverlay } from "./vision-debug-overlay";
 import { Camera, Monitor, StopCircle, AlertTriangle, Video, Gauge } from "lucide-react";
 import { formatTimestampTime } from "@/lib/time/time-service";
@@ -34,6 +35,16 @@ export function VisionInterface() {
       ? "webcam"
       : null;
   const activeStream = screenShareActive ? screenStream : webcamStream;
+
+  const prevActiveModeRef = useRef<CameraSource | null>(null);
+  useEffect(() => {
+    if (activeMode && !prevActiveModeRef.current) {
+      soundFX.play("camera-on");
+    } else if (!activeMode && prevActiveModeRef.current) {
+      soundFX.play("camera-off");
+    }
+    prevActiveModeRef.current = activeMode;
+  }, [activeMode]);
 
   useEffect(() => {
     if (activeMode) {

@@ -9,6 +9,7 @@ import { detectTricolorFlag, sampleBoxColor, sampleRegion, type NamedColor } fro
 import { ByteTrackLite } from "./detect/tracker";
 import { getSharedDetector, type YoloResult } from "./detect/yolo-detector";
 import { getOcrEngine, isOcrAvailable } from "./ocr";
+import { visionCache } from "./vision-cache";
 import {
   getVisionStateStore,
   type FaceSighting,
@@ -18,6 +19,7 @@ import {
   type VisionStateSnapshot,
 } from "./vision-state";
 import sharp from "sharp";
+import { randomUUID } from "node:crypto";
 
 /**
  * Server-side real-time vision engine (YOLO pipeline).
@@ -98,6 +100,12 @@ export interface LiveVisionResult {
 export interface LiveVisionStats {
   active: boolean;
   source: "webcam" | "screen" | null;
+  /** Unique id of the current camera session (new id on every open). */
+  cameraSessionId: string | null;
+  /** True when at least one frame has been analyzed in this session. */
+  visionReady: boolean;
+  /** Age in ms of the newest analyzed frame; Infinity when none yet. */
+  sceneCacheAgeMs: number;
   sessionStartedAt: number;
   framesSubmitted: number;
   framesAnalyzed: number;
@@ -139,6 +147,8 @@ export interface PipelineTimeline {
 interface LiveEngineStore {
   active: boolean;
   source: "webcam" | "screen" | null;
+  /** Unique id of the current camera session. A new id on every start. */
+  cameraSessionId: string | null;
   sessionStartedAt: number;
   latestFrame: LiveFrameInput | null;
   latestFrameKey: string | null;
@@ -146,6 +156,8 @@ interface LiveEngineStore {
   lastSubmitAt: number;
   result: LiveVisionResult | null;
   resultSeq: number;
+  /** Monotonic id of the newest analyzed frame (1-based within a session). */
+  frameSeq: number;
   tracker: ByteTrackLite;
   previousNames: string[];
   framesSubmitted: number;
@@ -181,6 +193,7 @@ function getStore(): LiveEngineStore {
   const store: LiveEngineStore = {
     active: false,
     source: null,
+    cameraSessionId: null,
     sessionStartedAt: 0,
     latestFrame: null,
     latestFrameKey: null,
@@ -188,6 +201,7 @@ function getStore(): LiveEngineStore {
     lastSubmitAt: 0,
     result: null,
     resultSeq: 0,
+    frameSeq: 0,
     tracker: new ByteTrackLite(),
     previousNames: [],
     framesSubmitted: 0,
@@ -551,6 +565,7 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
   };
   const maxConf = tracked.reduce((max, t) => Math.max(max, t.confidence), 0);
   const visionStore = getVisionStateStore();
+  const frameId = ++store.frameSeq;
   const tCache = performance.now();
   visionStore.update({
     objects: sceneObjects,
@@ -580,6 +595,8 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
       roiRuns: 0,
       roiHits,
     },
+    frameId,
+    cameraSessionId: store.cameraSessionId,
   });
   timeline.cacheUpdateMs = performance.now() - tCache;
 
@@ -709,21 +726,70 @@ async function ensureDetection(): Promise<void> {
   }
 }
 
+export function visionReady(): boolean {
+  const store = getStore();
+  return (
+    store.active &&
+    store.cameraSessionId !== null &&
+    getVisionStateStore().getState().frameId > 0 &&
+    getVisionStateStore().matchesSession(store.cameraSessionId)
+  );
+}
+
+export function currentCameraSessionId(): string | null {
+  return getStore().cameraSessionId;
+}
+
 export const liveVisionEngine = {
-  /** Mark the session active so the engine keeps accepting frames. */
+  /**
+   * Mark the session active so the engine keeps accepting frames. Starting a
+   * new session rotates the camera session id and wipes the previous session's
+   * scene cache and Gemma answer cache so nothing stale leaks into the new one.
+   * Never blocks the caller: ONNX warm-up runs in the background.
+   */
   start(source: "webcam" | "screen"): void {
     const store = getStore();
+    store.cameraSessionId = randomUUID();
     store.active = true;
     store.source = source;
-    store.sessionStartedAt = store.sessionStartedAt || Date.now();
-    log.info("Live vision session started", { source });
+    store.sessionStartedAt = Date.now();
+    store.frameSeq = 0;
+    store.framesSubmitted = 0;
+    store.framesAnalyzed = 0;
+    store.lastProcessedKey = null;
+    store.result = null;
+    store.previousNames = [];
+    store.tracker.reset();
+    store.recentInferenceMs = [];
+    store.recentPipelineMs = [];
+    store.colorVotes.clear();
+    store.colorCache.clear();
+    store.modelReady = false;
+    store.modelError = null;
+    store.lastError = null;
+    getVisionStateStore().reset();
+    visionCache.clear();
+    log.info("Live vision session started", { source, cameraSessionId: store.cameraSessionId });
+    void getSharedDetector()
+      .init()
+      .then(() => {
+        store.modelReady = true;
+        log.info("YOLO model warm-up complete");
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        store.modelError = message;
+        store.modelReady = false;
+        log.warn("YOLO model warm-up failed", { message });
+      });
   },
 
-  /** End the session, clear the tracker and reset state. */
+  /** End the session, clear the tracker and reset all vision state. */
   stop(): void {
     const store = getStore();
     store.active = false;
     store.source = null;
+    store.cameraSessionId = null;
     store.latestFrame = null;
     store.latestFrameKey = null;
     store.lastProcessedKey = null;
@@ -734,6 +800,8 @@ export const liveVisionEngine = {
     store.recentPipelineMs = [];
     store.colorVotes.clear();
     store.colorCache.clear();
+    getVisionStateStore().reset();
+    visionCache.clear();
     log.info("Live vision session stopped");
   },
 
@@ -847,6 +915,9 @@ export const liveVisionEngine = {
     return {
       active: store.active,
       source: store.source,
+      cameraSessionId: store.cameraSessionId,
+      visionReady: getVisionStateStore().getState().frameId > 0,
+      sceneCacheAgeMs: getVisionStateStore().getAgeMs(),
       sessionStartedAt: store.sessionStartedAt,
       framesSubmitted: store.framesSubmitted,
       framesAnalyzed: store.framesAnalyzed,

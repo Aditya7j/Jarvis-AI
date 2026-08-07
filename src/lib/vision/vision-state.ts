@@ -70,6 +70,10 @@ export interface VisionStateSnapshot {
   flag: FlagSighting | null;
   stats: VisionStats;
   lastGemma: LastGemmaCall | null;
+  /** Monotonic id of the newest analyzed frame (0 = none analyzed yet). */
+  frameId: number;
+  /** Owning camera session. Answers from another session are never reused. */
+  cameraSessionId: string | null;
 }
 
 export interface SceneUpdateInput {
@@ -84,6 +88,8 @@ export interface SceneUpdateInput {
   heldObject?: { label: string; confidence: number } | null;
   flag?: FlagSighting | null;
   stats?: Partial<VisionStats>;
+  frameId?: number;
+  cameraSessionId?: string | null;
 }
 
 const EMPTY_STATS: VisionStats = {
@@ -114,6 +120,8 @@ class VisionStateStore {
     flag: null,
     stats: { ...EMPTY_STATS },
     lastGemma: null,
+    frameId: 0,
+    cameraSessionId: null,
   };
 
   update(input: SceneUpdateInput): VisionStateSnapshot {
@@ -141,12 +149,49 @@ class VisionStateStore {
       flag: input.flag ?? this.state.flag,
       lastGemma: this.state.lastGemma,
       stats: { ...this.state.stats, ...input.stats },
+      frameId: input.frameId ?? this.state.frameId,
+      cameraSessionId:
+        input.cameraSessionId !== undefined
+          ? input.cameraSessionId
+          : this.state.cameraSessionId,
     };
     return this.state;
   }
 
+  /** Clear the entire scene. Called when the camera closes or a new session starts. */
+  reset(): void {
+    this.state = {
+      latestObjects: {},
+      latestPeople: [],
+      latestColors: {},
+      latestText: { lines: [], engine: "none", latencyMs: 0 },
+      latestFaces: [],
+      latestFrame: null,
+      latestScene: null,
+      timestamp: 0,
+      overallConfidence: 0,
+      activeTrackingIds: [],
+      heldObject: null,
+      flag: null,
+      stats: { ...EMPTY_STATS },
+      lastGemma: null,
+      frameId: 0,
+      cameraSessionId: null,
+    };
+  }
+
   getState(): VisionStateSnapshot {
     return this.state;
+  }
+
+  /** Age of the newest analyzed frame in ms. Infinity when none is present. */
+  getAgeMs(): number {
+    return this.state.timestamp > 0 ? Date.now() - this.state.timestamp : Infinity;
+  }
+
+  /** True when the cache was written by the given camera session. */
+  matchesSession(sessionId: string | null): boolean {
+    return this.state.cameraSessionId === sessionId;
   }
 
   markGemma(reason: string): void {

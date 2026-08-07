@@ -14,6 +14,7 @@ import type {
   SystemClockFact,
 } from "./system-tools";
 import { getBatteryInfo, requestGeolocation } from "./browser-tools";
+import { soundFX } from "@/lib/audio/sound-service";
 
 type ErrorPayload = {
   code?: string;
@@ -27,6 +28,8 @@ interface SSEFrame {
   error?: ErrorPayload;
   vision?: VisionAnalysisSummary;
   visionState?: { phase?: string };
+  tool?: string;
+  ok?: boolean;
 }
 
 function parseSSEFrame(frame: string): SSEFrame | null {
@@ -209,11 +212,11 @@ export class AIClient {
         `✓ Answered from live vision result (no new capture — conf ${live?.summary?.confidence ?? "-"}%, ${live?.objects?.length ?? 0} object(s), ${live?.newObjects?.length ?? 0} new)`
       );
     } else if (needsVision && activeSource) {
-      // A single fresh, high-resolution analysis frame is the best input for
-      // Gemma: it is current, sharp and captures the moment of the question.
-      // Uploading several live frames tripled the payload while the server only
-      // ever used the newest one, so only this frame is sent.
-      const fresh = await visionService.captureAnalysisFrame(activeSource);
+      // Non-blocking: grab the newest frame the live loop already captured and
+      // encoded. Never wait for the camera to buffer or encode a fresh frame —
+      // the background loop keeps a recent frame ready so the chat round-trip
+      // is not stalled by vision.
+      const fresh = visionService.getNewestAnalysisFrame(activeSource);
       if (fresh) {
         body.vision = {
           state: "live",
@@ -230,12 +233,13 @@ export class AIClient {
         };
         const bytes = Math.round(fresh.dataUrl.length * 0.75);
         console.info(
-          `✓ Camera frame captured (${fresh.width}x${fresh.height}, ${bytes} bytes, JPEG base64)`
+          `✓ Newest live frame attached (${fresh.width}x${fresh.height}, ${bytes} bytes, JPEG base64)`
         );
+        soundFX.play("vision");
       } else {
         body.vision = { state: "no-frame", frames: [] };
         console.warn(
-          "⚠ Camera is ON but no frame could be captured for this request"
+          "⚠ Camera is ON but no recent frame is available — server will decide (warming/no-frame)"
         );
       }
     } else if (activeSource && !needsVision) {
@@ -296,6 +300,14 @@ export class AIClient {
           }
           if (parsed.visionState) {
             onStatus?.(parsed.visionState.phase ?? "");
+            continue;
+          }
+          if (parsed.tool) {
+            if (parsed.ok === false) {
+              soundFX.play("error");
+            } else {
+              soundFX.play("tool");
+            }
             continue;
           }
           if (parsed.done) return full;
