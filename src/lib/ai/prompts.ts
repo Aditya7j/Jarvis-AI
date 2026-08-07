@@ -59,7 +59,7 @@ export function buildVerifiedFactContext(
   fact: unknown
 ): string {
   return `Verified data from the ${toolLabel} tool — this is the ONLY source of truth for ${subject}:
-${JSON.stringify(fact, null, 2)}
+${JSON.stringify(fact)}
 STRICT:
 - ${subject[0].toUpperCase()}${subject.slice(1)} must come exclusively from the data above. Never guess, estimate, recall, infer or compute it yourself.
 - Present it naturally to the user in your own words. Never claim you checked, measured, fetched, looked it up, or are "recalibrating".

@@ -103,7 +103,7 @@ export function loadEnvConfig(): EnvConfig {
     qwen3Model: env("QWEN3_MODEL") ?? env("OLLAMA_MODEL") ?? "qwen3:latest",
     gemma3Model: env("GEMMA3_MODEL") ?? null,
     requestTimeoutMs: readTimeout("AI_REQUEST_TIMEOUT_MS", 60_000),
-    visionTimeoutMs: readTimeout("AI_VISION_TIMEOUT_MS", 300_000),
+    visionTimeoutMs: readTimeout("AI_VISION_TIMEOUT_MS", 15_000),
     healthTimeoutMs: readTimeout("AI_HEALTH_TIMEOUT_MS", 10_000),
     maxToolIterations: readInt("AI_MAX_TOOL_ITERATIONS", 4),
     sttMode: readEnum("STT_MODE", ["auto", "whisper", "deepgram", "browser"] as const, "auto"),

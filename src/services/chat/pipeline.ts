@@ -24,11 +24,17 @@
 
 import { aiLogger } from "@/lib/ai/logger";
 import {
+  createWaterfall,
+  formatWaterfall,
+  getCurrentWaterfall,
+  setCurrentWaterfall,
+} from "@/lib/metrics/waterfall";
+import {
   detectLanguage,
   logLanguageDetection,
   type SpokenLanguage,
 } from "@/lib/lang/detect";
-import { localizeReply } from "@/lib/lang/replies";
+import { localizeConversationalReply, localizeReply } from "@/lib/lang/replies";
 import {
   DEFAULT_SYSTEM_PROMPT,
   buildVerifiedFactContext,
@@ -43,6 +49,7 @@ import type { AIMessageInput } from "@/lib/ai/types";
 import { parseConversionRequest } from "@/lib/toolkit/convert";
 import { normalizeCurrency, parseCurrencyRequest } from "@/lib/toolkit/web";
 import { getContextEngine } from "@/services/context/context-engine";
+import type { BatteryFact, WeatherFact } from "@/lib/ai/system-tools";
 import {
   classifyPlanIntent,
   planRoute,
@@ -50,6 +57,8 @@ import {
 } from "@/services/planner";
 import {
   detectBattery,
+  detectConversational,
+  detectGreeting,
   detectMaps,
   detectMemoryRecall,
   detectMemoryStore,
@@ -129,19 +138,15 @@ function awarenessBlock(): string | null {
   logTimeService("pipeline-awareness", clock);
   const blocks: string[] = [
     `Verified data from the TimeService tool — this is the ONLY source of truth for the current date, time, timezone and greeting:
-${JSON.stringify(
-  {
-    iso: clock.iso,
-    unixMs: clock.unixMs,
-    time: clock.time,
-    date: clock.date,
-    timezone: clock.timezone,
-    greeting: clock.greeting,
-    dayPart: clock.dayPart,
-  },
-  null,
-  2
-)}`,
+${JSON.stringify({
+  iso: clock.iso,
+  unixMs: clock.unixMs,
+  time: clock.time,
+  date: clock.date,
+  timezone: clock.timezone,
+  greeting: clock.greeting,
+  dayPart: clock.dayPart,
+})}`,
   ];
   try {
     const engine = getContextEngine();
@@ -150,9 +155,7 @@ ${JSON.stringify(
       if (snapshot.server || snapshot.client) {
         blocks.push(
           `Live environment snapshot (verified at ${clock.iso}):\n${JSON.stringify(
-            snapshot,
-            null,
-            2
+            snapshot
           )}`
         );
       }
@@ -168,11 +171,15 @@ type MemoryLike = {
 };
 
 async function memoryContextBlock(prompt: string): Promise<string | null> {
+  const wf = getCurrentWaterfall();
+  wf?.mark("memory_lookup");
+  wf?.count("memoryCalls");
   let memoryService: MemoryLike;
   try {
     const mod = await import("@/lib/memory");
     memoryService = mod.memoryService as MemoryLike;
   } catch {
+    wf?.end("memory_lookup");
     return null;
   }
   try {
@@ -181,11 +188,16 @@ async function memoryContextBlock(prompt: string): Promise<string | null> {
       search: prompt.slice(0, 120),
       limit: 3,
     });
-    if (!entries || entries.length === 0) return null;
+    if (!entries || entries.length === 0) {
+      wf?.end("memory_lookup");
+      return null;
+    }
+    wf?.end("memory_lookup");
     return `Relevant long-term memories about this user:\n${entries
       .map((entry) => `- [${entry.category}] ${entry.content}`)
       .join("\n")}`;
   } catch {
+    wf?.end("memory_lookup");
     return null;
   }
 }
@@ -412,14 +424,472 @@ function liveFactSummary(data: unknown): Record<string, unknown> | null {
   return null;
 }
 
+const HINDI_CONDITIONS: Record<string, string> = {
+  "Clear sky": "आसमान साफ़ है",
+  "Mainly clear": "ज्यादातर साफ़ है",
+  "Partly cloudy": "आंशिक बादल छाए हैं",
+  Overcast: "पूरी तरह बादल छाए हैं",
+  Fog: "कोहरा है",
+  "Depositing rime fog": "घना कोहरा है",
+  "Light drizzle": "हल्की बूंदाबांदी है",
+  Drizzle: "बूंदाबांदी है",
+  "Dense drizzle": "तेज़ बूंदाबांदी है",
+  "Light rain": "हल्की बारिश है",
+  Rain: "बारिश हो रही है",
+  "Heavy rain": "तेज़ बारिश है",
+  "Light snow": "हल्की बर्फबारी है",
+  Snow: "बर्फबारी हो रही है",
+  "Heavy snow": "तेज़ बर्फबारी है",
+  "Rain showers": "बारिश की बौछारें हैं",
+  "Thunderstorm": "आंधी-तूफान है",
+  Unknown: "अज्ञात",
+};
+
+function formatWeatherDirect(
+  weather: WeatherFact,
+  language: SpokenLanguage
+): string {
+  const temp = weather.temperatureC;
+  const feels = weather.feelsLikeC;
+  const humidity = weather.humidity;
+  const wind = weather.windSpeedKmh;
+  const condition =
+    language === "hindi"
+      ? (HINDI_CONDITIONS[weather.condition] ?? weather.condition)
+      : weather.condition;
+
+  const tempPart =
+    temp !== null
+      ? `${temp}°C${feels !== null ? ` (feels like ${feels}°C)` : ""}`
+      : null;
+  if (language === "hindi") {
+    const core = tempPart
+      ? `अभी तापमान ${tempPart} है, ${condition}।`
+      : `अभी ${condition}।`;
+    const extras = [];
+    if (humidity !== null) extras.push(`आर्द्रता ${Math.round(humidity)}%`);
+    if (wind !== null) extras.push(`हवा ${Math.round(wind)} किमी/घंटा`);
+    return extras.length > 0 ? `${core} ${extras.join(", ")}।` : core;
+  }
+  if (language === "hinglish") {
+    const core = tempPart
+      ? `Abhi temperature ${tempPart} hai, ${weather.condition}.`
+      : `Abhi ${weather.condition} hai.`;
+    const extras = [];
+    if (humidity !== null) extras.push(`humidity ${Math.round(humidity)}%`);
+    if (wind !== null) extras.push(`wind ${Math.round(wind)} km/h`);
+    return extras.length > 0 ? `${core} ${extras.join(", ")}.` : core;
+  }
+  const core = tempPart
+    ? `It's currently ${tempPart} and ${weather.condition.toLowerCase()}.`
+    : `It's currently ${weather.condition.toLowerCase()}.`;
+  const extras = [];
+  if (humidity !== null) extras.push(`humidity at ${Math.round(humidity)}%`);
+  if (wind !== null) extras.push(`wind at ${Math.round(wind)} km/h`);
+  return extras.length > 0 ? `${core} Conditions: ${extras.join(", ")}.` : core;
+}
+
+function formatBatteryDirect(
+  battery: BatteryFact,
+  language: SpokenLanguage
+): string {
+  const level = battery.levelPercent;
+  if (language === "hindi") {
+    return `आपकी बैटरी ${level}% है${battery.charging ? " और चार्ज हो रही है" : " और चार्ज नहीं हो रही"}।`;
+  }
+  if (language === "hinglish") {
+    return `Aapki battery ${level}% hai${battery.charging ? " aur charging ho rahi hai" : " aur charging nahi ho rahi"}.`;
+  }
+  return `Your battery is at ${level}%${battery.charging ? " and charging" : " and not charging"}.`;
+}
+
+/**
+ * Deterministic formatting for naturalize classes whose verified fact set is
+ * complete enough to answer directly — the reasoning model is skipped entirely.
+ * Returns null when LLM naturalization is still required.
+ */
+function tr(
+  language: SpokenLanguage,
+  en: string,
+  hi: string,
+  hinglish: string
+): string {
+  if (language === "hindi") return hi;
+  if (language === "hinglish") return hinglish;
+  return en;
+}
+
+function formatMemorySearchDirect(
+  fact: unknown,
+  language: SpokenLanguage
+): string {
+  const f = fact as {
+    count?: number;
+    entries?: Array<{ content?: string }>;
+  };
+  const entries = (f.entries ?? []).filter((e) => e.content);
+  if (f.count === 0 || entries.length === 0) {
+    return tr(
+      language,
+      "I couldn't find anything in my memory about that.",
+      "मुझे इसके बारे में अपनी स्मृति में कुछ नहीं मिला।",
+      "Mujhe iske baare mein apni memory mein kuch nahi mila."
+    );
+  }
+  const list = entries
+    .slice(0, 5)
+    .map((e) => `- ${e.content}`)
+    .join("\n");
+  const head =
+    entries.length === 1
+      ? tr(language, "Here's what I remember:", "मुझे यह याद है:", "Mujhe ye yaad hai:")
+      : tr(
+          language,
+          `Here's what I remember (${f.count} matches):`,
+          `मुझे ये याद हैं (${f.count} मिलान):`,
+          `Mujhe ye yaadein hain (${f.count} matches):`
+        );
+  return `${head}\n${list}`;
+}
+
+function formatMemoryStoredDirect(_fact: unknown, language: SpokenLanguage): string {
+  return tr(
+    language,
+    "Got it — I've stored that in memory.",
+    "ठीक है — मैंने इसे अपनी स्मृति में संग्रहीत कर लिया है।",
+    "Theek hai — maine ise memory mein store kar liya."
+  );
+}
+
+function formatTasksListDirect(
+  fact: unknown,
+  language: SpokenLanguage
+): string {
+  const f = fact as {
+    count?: number;
+    tasks?: Array<{ title?: string; status?: string }>;
+  };
+  const tasks = (f.tasks ?? []).filter((t) => t.title);
+  if (f.count === 0 || tasks.length === 0) {
+    return tr(
+      language,
+      "You have no tasks right now.",
+      "अभी आपके पास कोई कार्य नहीं है।",
+      "Abhi aapke paas koi task nahi hai."
+    );
+  }
+  const list = tasks
+    .slice(0, 8)
+    .map((t) => `- ${t.title}${t.status ? ` (${t.status})` : ""}`)
+    .join("\n");
+  const head = tr(
+    language,
+    `You have ${f.count} task${f.count === 1 ? "" : "s"}:`,
+    `आपके पास ${f.count} कार्य ${f.count === 1 ? "है" : "हैं"}:`,
+    `Aapke paas ${f.count} task${f.count === 1 ? "" : "s"} hain:`
+  );
+  return `${head}\n${list}`;
+}
+
+function formatTaskCreatedDirect(
+  fact: unknown,
+  language: SpokenLanguage
+): string {
+  const f = fact as {
+    title?: string;
+    scheduledAt?: number | null;
+    nextRunAt?: number | null;
+  };
+  const title = f.title ?? "";
+  let reply = tr(
+    language,
+    `Task created${title ? `: "${title}"` : ""}.`,
+    `कार्य बनाया गया${title ? `: "${title}"` : ""}।`,
+    `Task ban gaya${title ? `: "${title}"` : ""}.`
+  );
+  const at = f.scheduledAt ?? f.nextRunAt;
+  if (typeof at === "number" && Number.isFinite(at)) {
+    const time = new Date(at).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    reply += tr(
+      language,
+      ` Scheduled for ${time}.`,
+      ` ${time} के लिए निर्धारित।`,
+      ` ${time} ke liye scheduled.`
+    );
+  }
+  return reply;
+}
+
+function formatCalendarDirect(
+  fact: unknown,
+  language: SpokenLanguage
+): string {
+  const f = fact as {
+    count?: number;
+    items?: Array<{ title?: string; status?: string; at?: number | null }>;
+  };
+  const items = (f.items ?? []).filter((it) => it.title);
+  if (f.count === 0 || items.length === 0) {
+    return tr(
+      language,
+      "You have nothing scheduled today.",
+      "आज आपके लिए कुछ भी निर्धारित नहीं है।",
+      "Aaj aapke liye kuch bhi scheduled nahi hai."
+    );
+  }
+  const list = items
+    .slice(0, 6)
+    .map((it) => {
+      const time =
+        typeof it.at === "number" && Number.isFinite(it.at)
+          ? new Date(it.at).toLocaleTimeString([], {
+              hour: "numeric",
+              minute: "2-digit",
+            })
+          : null;
+      const status =
+        it.status && it.status !== "scheduled" ? ` (${it.status})` : "";
+      return `- ${time ? `${time} — ` : ""}${it.title}${status}`;
+    })
+    .join("\n");
+  const head = tr(
+    language,
+    `Your schedule today (${f.count} item${f.count === 1 ? "" : "s"}):`,
+    `आज का आपका कार्यक्रम (${f.count} आइटम):`,
+    `Aaj ka aapka schedule (${f.count} items):`
+  );
+  return `${head}\n${list}`;
+}
+
+function formatProfileDirect(
+  fact: unknown,
+  q: string,
+  language: SpokenLanguage
+): string {
+  const f = fact as {
+    name?: string | null;
+    nickname?: string | null;
+    occupation?: string | null;
+    skills?: string[] | null;
+    interests?: string[] | null;
+    goals?: string[] | null;
+    location?: string | null;
+  };
+  if (/my\s+name|who\s+am\s+i|naam|नाम/i.test(q) && f.name) {
+    return tr(
+      language,
+      `Your name is ${f.name}.`,
+      `आपका नाम ${f.name} है।`,
+      `Aapka naam ${f.name} hai.`
+    );
+  }
+  const parts: string[] = [];
+  if (f.name) parts.push(f.name);
+  if (f.occupation) parts.push(f.occupation);
+  if (f.interests?.length) {
+    parts.push(
+      `interested in ${f.interests.slice(0, 4).join(", ")}`
+    );
+  }
+  if (f.skills?.length) {
+    parts.push(`skilled in ${f.skills.slice(0, 4).join(", ")}`);
+  }
+  if (parts.length === 0) {
+    return tr(
+      language,
+      "I don't have a stored profile yet.",
+      "अभी मेरे पास कोई संग्रहीत प्रोफ़ाइल नहीं है।",
+      "Abhi mere paas koi stored profile nahi hai."
+    );
+  }
+  const summary = `${parts[0]}`;
+  const rest = parts.slice(1).join(", ");
+  const body = rest ? `${summary} — ${rest}` : summary;
+  return tr(
+    language,
+    `Here's your profile: ${body}.`,
+    `यहाँ आपकी प्रोफ़ाइल है: ${body}।`,
+    `Yeh rahi aapki profile: ${body}.`
+  );
+}
+
+function formatSystemStatusDirect(
+  fact: unknown,
+  language: SpokenLanguage
+): string {
+  const f = fact as {
+    cpu?: { loadPercent?: number };
+    memory?: { usedPercent?: number };
+    disk?: { usedPercent?: number | null };
+  };
+  const parts: string[] = [];
+  if (typeof f.cpu?.loadPercent === "number") {
+    parts.push(`CPU ${Math.round(f.cpu.loadPercent)}%`);
+  }
+  if (typeof f.memory?.usedPercent === "number") {
+    parts.push(`memory ${Math.round(f.memory.usedPercent)}%`);
+  }
+  if (typeof f.disk?.usedPercent === "number") {
+    parts.push(`disk ${Math.round(f.disk.usedPercent)}%`);
+  }
+  if (parts.length === 0) return "";
+  return tr(
+    language,
+    `Current usage: ${parts.join(", ")}.`,
+    `वर्तमान उपयोग: ${parts.join(", ")}।`,
+    `Current usage: ${parts.join(", ")} hai.`
+  );
+}
+
+function formatSearchDirect(fact: unknown, language: SpokenLanguage): string {
+  const f = fact as {
+    answer?: string | null;
+    abstract?: string | null;
+    heading?: string | null;
+    source?: string | null;
+    topics?: Array<{ text?: string }>;
+  };
+  if (f.answer?.trim()) return f.answer.trim();
+  if (f.abstract?.trim()) {
+    const prefix = f.source ? `According to ${f.source}: ` : "";
+    return `${prefix}${f.abstract.trim()}`;
+  }
+  if (f.heading?.trim()) return f.heading.trim();
+  const topics = (f.topics ?? []).map((t) => t.text).filter(Boolean);
+  if (topics.length > 0) {
+    return topics.slice(0, 3).map((t) => `- ${t}`).join("\n");
+  }
+  return tr(
+    language,
+    "I couldn't find anything for that.",
+    "मुझे इसके लिए कुछ नहीं मिला।",
+    "Mujhe iske liye kuch nahi mila."
+  );
+}
+
+function formatNewsDirect(fact: unknown, language: SpokenLanguage): string {
+  const f = fact as { stories?: Array<{ title?: string }> };
+  const stories = (f.stories ?? []).map((s) => s.title).filter(Boolean);
+  if (stories.length === 0) {
+    return tr(
+      language,
+      "I couldn't fetch the news right now.",
+      "मैं अभी समाचार नहीं ला सका।",
+      "Main abhi news nahi la paya."
+    );
+  }
+  const list = stories
+    .slice(0, 6)
+    .map((title, i) => `${i + 1}. ${title}`)
+    .join("\n");
+  return tr(
+    language,
+    `Here are the latest headlines:\n${list}`,
+    `ताज़ा समाचार शीर्षक:\n${list}`,
+    `Latest headlines:\n${list}`
+  );
+}
+
+function formatMapsDirect(fact: unknown, language: SpokenLanguage): string {
+  const f = fact as { url?: string; mode?: string };
+  if (!f.url) return "";
+  const prefix =
+    f.mode === "directions"
+      ? tr(
+          language,
+          "Here are the directions:",
+          "ये रही दिशाएँ:",
+          "Directions ye hain:"
+        )
+      : tr(
+          language,
+          "Here's where to find it:",
+          "यहाँ देखें:",
+          "Yahan dekho:"
+        );
+  return `${prefix} ${f.url}`;
+}
+
+function formatDirectNaturalize(
+  cls: PlanClass,
+  q: string,
+  facts: VerifiedFact[],
+  language: SpokenLanguage
+): string | null {
+  if (cls === "weather") {
+    const fact = facts.find((f) => f.tool === "get_weather");
+    const weather = fact?.fact as WeatherFact | undefined;
+    if (weather && typeof weather.temperatureC === "number") {
+      return formatWeatherDirect(weather, language);
+    }
+    return null;
+  }
+  if (cls === "system" && detectBattery(q)) {
+    const fact = facts.find((f) => f.tool === "battery-status");
+    const battery = fact?.fact as BatteryFact | undefined;
+    if (battery && typeof battery.levelPercent === "number") {
+      return formatBatteryDirect(battery, language);
+    }
+    return null;
+  }
+  if (cls === "system" && !detectBattery(q)) {
+    const fact = facts.find((f) => f.tool === "get_system_status");
+    if (fact) return formatSystemStatusDirect(fact.fact, language) || null;
+    return null;
+  }
+  if (cls === "memory") {
+    const stored = facts.find((f) => f.tool === "remember");
+    if (stored) return formatMemoryStoredDirect(stored.fact, language);
+    const search = facts.find(
+      (f) => f.tool === "search_memory" || f.tool === "list_memories"
+    );
+    if (search) return formatMemorySearchDirect(search.fact, language);
+    return null;
+  }
+  if (cls === "tasks") {
+    const created = facts.find((f) => f.tool === "create_task");
+    if (created) return formatTaskCreatedDirect(created.fact, language);
+    const listed = facts.find((f) => f.tool === "list_tasks");
+    if (listed) return formatTasksListDirect(listed.fact, language);
+    return null;
+  }
+  if (cls === "calendar") {
+    const fact = facts.find((f) => f.tool === "get_calendar");
+    if (fact) return formatCalendarDirect(fact.fact, language);
+    return null;
+  }
+  if (cls === "profile") {
+    const fact = facts.find((f) => f.tool === "get_owner_profile");
+    if (fact) return formatProfileDirect(fact.fact, q, language);
+    return null;
+  }
+  if (cls === "search") {
+    const news = facts.find((f) => f.tool === "get_news");
+    if (news) return formatNewsDirect(news.fact, language);
+    const maps = facts.find((f) => f.tool === "maps_link");
+    if (maps) return formatMapsDirect(maps.fact, language);
+    const search = facts.find((f) => f.tool === "web_search");
+    if (search) return formatSearchDirect(search.fact, language);
+    return null;
+  }
+  return null;
+}
+
 async function executeSteps(
   tools: string[],
   argFor: (tool: string) => Record<string, unknown>,
   options: { signal?: AbortSignal; requestId?: string } = {}
 ): Promise<{ facts: VerifiedFact[]; results: ToolResult[] }> {
+  const wf = getCurrentWaterfall();
+  const toolStartedAt = Date.now();
+  wf?.mark("tool_execution");
   const facts: VerifiedFact[] = [];
   const results: ToolResult[] = [];
   for (const tool of tools) {
+    wf?.count("toolCalls");
     log.info("[Tool Selected]", { requestId: options.requestId, tool });
     const result = await executeTool(tool, argFor(tool) ?? {}, {
       signal: options.signal,
@@ -450,6 +920,8 @@ async function executeSteps(
       });
     }
   }
+  wf?.end("tool_execution");
+  wf?.addTool(Date.now() - toolStartedAt);
   return { facts, results };
 }
 
@@ -470,12 +942,31 @@ async function* streamThrough(
   signal?: AbortSignal,
   modelName?: string
 ): AsyncGenerator<PipelineEvent> {
+  const wf = getCurrentWaterfall();
+  const llmStartedAt = Date.now();
+  wf?.count("llmCalls");
+  wf?.mark("llm_first_token");
   for await (const token of model.streamText({ messages, signal, model: modelName })) {
+    if (wf) {
+      wf.setFirstToken();
+      wf.end("llm_first_token");
+      wf.mark("llm_complete");
+    }
     const clean = filter.push(token);
-    if (clean) yield { kind: "token", text: clean };
+    if (clean) {
+      wf?.addResponse(clean.length);
+      yield { kind: "token", text: clean };
+    }
   }
   const tail = filter.flush();
-  if (tail) yield { kind: "token", text: tail };
+  if (tail) {
+    wf?.addResponse(tail.length);
+    yield { kind: "token", text: tail };
+  }
+  if (wf) {
+    wf.end("llm_complete");
+    wf.addLlm(Date.now() - llmStartedAt);
+  }
 }
 
 interface FinishArgs {
@@ -495,6 +986,8 @@ interface FinishArgs {
 /** Emit the response-source tag + done, log the pipeline trace, record the
  *  hallucination measurement. Called on EVERY exit path. */
 function* finish(args: FinishArgs): Generator<PipelineEvent> {
+  const wf = getCurrentWaterfall();
+  wf?.mark("postprocess");
   yield { kind: "source", source: args.source };
   yield { kind: "done" };
   const latencyMs = Date.now() - args.startedAt;
@@ -530,6 +1023,12 @@ function* finish(args: FinishArgs): Generator<PipelineEvent> {
     source: args.source,
     hallucination,
   });
+  if (wf) {
+    wf.end("postprocess");
+    wf.end("request_received");
+    log.info("[waterfall]", formatWaterfall(wf.snapshot()));
+  }
+  setCurrentWaterfall(null);
   hallucinationMonitor.record({
     requestId: args.requestId,
     prompt: args.prompt.slice(0, 120),
@@ -566,15 +1065,21 @@ export async function* runPipeline(
   const startedAt = Date.now();
   const signal = options.signal;
 
+  const wf = createWaterfall(requestId, startedAt, prompt.length);
+  setCurrentWaterfall(wf);
+  wf.mark("request_received");
+
   // ---------- Language stage ----------
   // The user's language is detected deterministically (no LLM, sub-5ms) and
   // drives ONLY presentation: the LLM responds in it, direct tool answers are
   // formatted in it, and canned fallbacks are localized. Tool routing and
   // execution stay language independent.
+  wf.mark("language_detection");
   const detectionStartedAt = Date.now();
   const detection = detectLanguage(prompt);
   const language = detection.language;
   logLanguageDetection("pipeline", prompt, detection, Date.now() - detectionStartedAt);
+  wf.end("language_detection");
   const languageBlock =
     language === "english" ? null : languageInstruction(language);
 
@@ -595,7 +1100,9 @@ export async function* runPipeline(
     return;
   }
 
+  wf.mark("planner");
   const route = planRoute(prompt, { clientTools: options.clientTools });
+  wf.end("planner");
   const { cls } = route.step;
   const tools = route.step.tools;
   const label = route.step.label;
@@ -620,6 +1127,33 @@ export async function* runPipeline(
   let llmInvoked = false;
   let source: ResponseSource = "reasoning";
   let fallbackReason: string | undefined;
+
+  // ---------- Conversational fast path (no LLM, <100ms) ----------
+  // Greetings and casual acknowledgements ("hi", "thanks", "ok", "how are
+  // you") are answered with a localized canned reply. The planner already
+  // matched them as conversational (route.kind === "llm", cls reasoning); we
+  // intercept here so no reasoning model is ever streamed for them.
+  if (route.kind === "llm" && detectConversational(q)) {
+    const reply = localizeConversationalReply(language, q, detectGreeting(q));
+    wf?.addResponse(reply.length);
+    yield { kind: "status", phase: "answering" };
+    yield { kind: "token", text: reply };
+    source = "reasoning";
+    llmInvoked = false;
+    yield* finish({
+      requestId,
+      prompt,
+      cls,
+      routeKind: route.kind,
+      source,
+      tools: toolTraces,
+      verifiedFactCount: 0,
+      llmInvoked,
+      startedAt,
+      options,
+    });
+    return;
+  }
 
   // ---------- LLM confidence gate ----------
   // A request for a live fact (time/date/weather/…) that NO tool routed to
@@ -855,9 +1389,11 @@ export async function* runPipeline(
     if (plan.summary) yield { kind: "vision", summary: plan.summary };
     yield { kind: "status", phase: "answering" };
     const filter = new CoTFilter();
+    wf.mark("context_build");
     let finalMessages = messages;
     if (languageBlock) finalMessages = injectSystemBlock(finalMessages, languageBlock);
     if (plan.systemContext) finalMessages = injectSystemBlock(finalMessages, plan.systemContext);
+    wf.end("context_build");
     llmInvoked = true;
     yield* streamThrough(model, finalMessages, filter, signal, options.model);
     source = "vision";
@@ -880,9 +1416,11 @@ export async function* runPipeline(
   if (cls === "reasoning") {
     yield { kind: "status", phase: "answering" };
     const filter = new CoTFilter();
+    wf.mark("context_build");
     const contextBlocks: Array<string | null> = [languageBlock];
     if (options.includeAwareness !== false) contextBlocks.push(awarenessBlock());
     const finalMessages = withSystemContext(messages, contextBlocks);
+    wf.end("context_build");
     llmInvoked = true;
     log.info("[LLM Input]", { requestId, intent: cls, messages: finalMessages.length });
     yield* streamThrough(model, finalMessages, filter, signal, options.model);
@@ -999,7 +1537,13 @@ export async function* runPipeline(
       break;
     }
     case "system": {
-      toolsToRun = tools.includes("get_system_status") ? ["get_system_status"] : [];
+      const batteryOnly =
+        detectBattery(q) && options.clientTools?.battery?.granted;
+      toolsToRun = batteryOnly
+        ? []
+        : tools.includes("get_system_status")
+          ? ["get_system_status"]
+          : [];
       argFor = () => ({});
       break;
     }
@@ -1079,7 +1623,35 @@ export async function* runPipeline(
     return;
   }
 
+  // ---------- Direct formatting for complete verified fact sets (no LLM) ----------
+  // Weather and battery carry closed, complete fact sets that format
+  // deterministically — the reasoning model is skipped entirely.
+  const directNaturalize = formatDirectNaturalize(cls, q, facts, language);
+  if (directNaturalize) {
+    wf?.addResponse(directNaturalize.length);
+    yield { kind: "status", phase: "answering" };
+    for (const fact of facts) {
+      yield { kind: "fact", tool: fact.tool, subject: fact.subject };
+    }
+    yield { kind: "token", text: directNaturalize };
+    source = cls === "memory" ? "memory" : "tool";
+    yield* finish({
+      requestId,
+      prompt,
+      cls,
+      routeKind: route.kind,
+      source,
+      tools: toolTraces,
+      verifiedFactCount: facts.length,
+      llmInvoked,
+      startedAt,
+      options,
+    });
+    return;
+  }
+
   for (const fact of facts) yield { kind: "fact", tool: fact.tool, subject: fact.subject };
+  wf.mark("context_build");
   let finalMessages = injectVerifiedFacts(base, facts);
 
   if (options.includeMemory !== false) {
@@ -1088,6 +1660,7 @@ export async function* runPipeline(
       finalMessages = [{ role: "system", content: memoryBlock }, ...finalMessages];
     }
   }
+  wf.end("context_build");
 
   log.info("[verified-facts]", { count: facts.length, intent: cls });
   yield { kind: "status", phase: "answering" };

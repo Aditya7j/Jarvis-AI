@@ -176,9 +176,14 @@ describe("verification contract", () => {
   });
 
   describe("naturalize classes run the tool BEFORE the model speaks", () => {
-    it("calendar → get_calendar first, then LLM summarizes the verified schedule", async () => {
-      let seen: unknown[] = [];
-      const model = recordingModel(["Summarized."], (messages) => (seen = messages));
+    it("calendar → get_calendar first, then formatted directly from the verified schedule (no LLM)", async () => {
+      let modelCalled = false;
+      const model: PipelineModel = {
+        streamText: async function* () {
+          modelCalled = true;
+          yield "should never be called";
+        },
+      };
       const result = await runPipelineText(
         "What's on my calendar today?",
         [{ role: "user", content: "What's on my calendar today?" }],
@@ -188,15 +193,20 @@ describe("verification contract", () => {
       expect(tools[0].tool).toBe("get_calendar");
       expect(tools[0].ok).toBe(true);
       expect(taskStub.taskEngine.listTasks).toHaveBeenCalled();
-      // The verified fact must be in the model's messages.
-      expect(JSON.stringify(seen)).toContain("Standup at 10");
-      expect(JSON.stringify(seen)).toContain("ONLY source of truth");
+      // The verified fact is formatted deterministically — the model is skipped.
+      expect(result.text).toContain("Standup at 10");
+      expect(modelCalled).toBe(false);
       expect(result.source).toBe("tool");
     });
 
     it("profile → get_owner_profile first, never the model guessing the name", async () => {
-      let seen: unknown[] = [];
-      const model = recordingModel(["Verified."], (messages) => (seen = messages));
+      let modelCalled = false;
+      const model: PipelineModel = {
+        streamText: async function* () {
+          modelCalled = true;
+          yield "should never be called";
+        },
+      };
       const result = await runPipelineText(
         "What is my name?",
         [{ role: "user", content: "What is my name?" }],
@@ -205,11 +215,13 @@ describe("verification contract", () => {
       const tools = toolEventsOf(result.events);
       expect(tools[0].tool).toBe("get_owner_profile");
       expect(tools[0].ok).toBe(true);
-      expect(JSON.stringify(seen)).toContain("Alex Developer");
+      // The verified profile is formatted deterministically — the model is skipped.
+      expect(result.text).toContain("Alex Developer");
+      expect(modelCalled).toBe(false);
       expect(result.source).toBe("tool");
     });
 
-    it("weather → get_weather from a verified location before the LLM", async () => {
+    it("weather → get_weather from a verified location, formatted directly (no LLM)", async () => {
       vi.stubGlobal(
         "fetch",
         vi.fn(async (url: string) => {
@@ -242,7 +254,9 @@ describe("verification contract", () => {
       const tools = toolEventsOf(result.events);
       expect(tools[0].tool).toBe("get_weather");
       expect(tools[0].ok).toBe(true);
-      expect(JSON.stringify(seen)).toContain("31.2");
+      // The verified fact is formatted deterministically — the model is skipped.
+      expect(result.text).toContain("31.2");
+      expect(seen).toEqual([]);
       expect(result.source).toBe("tool");
     });
 

@@ -60,6 +60,11 @@ const REASONING_PREFIX_RE = /^[\s\S]*?<\/(?:think|reasoning|thought)>\s*/i;
 const REASONING_BLOCK_RE =
   /<think>[\s\S]*?<\/think>|<reasoning>[\s\S]*?<\/reasoning>|<thought>[\s\S]*?<\/thought>/gi;
 const REASONING_CLOSE_RE = /<\/(?:think|reasoning|thought)>/i;
+/** Opening reasoning tag — mirrored to what REASONING_CLOSE_RE can close. */
+const REASONING_OPEN_RE = /<\s*(?:think|reasoning|thought)\b/i;
+/** Keep this many characters buffered while streaming clean content, so an
+ *  opening reasoning tag that straddles a chunk boundary is still stripped. */
+const STRIP_MARGIN = 64;
 
 /** Models whose raw content channel carries the reasoning prefix. */
 const REASONING_LEAK_MODELS = ["qwen3", "qwen2.5", "qwq", "deepseek", "kimi"];
@@ -87,10 +92,11 @@ export function stripDanglingReasoning(content: string): string {
 }
 
 /**
- * Streaming reasoning strip. For reasoning models the content is buffered
- * until the closing reasoning tag arrives, then the reasoning prefix is
- * dropped and the final answer streams — the UI never sees a partial thought.
- * Non-reasoning models pass through untouched (no buffering, no latency).
+ * Streaming reasoning strip. Only a real reasoning block (opening tag present)
+ * is buffered — everything before the block and after its closing tag streams
+ * in real time. Content that never opens a reasoning block is passed through
+ * immediately, so a slow model can never hold the whole response hostage while
+ * the UI sits blank. Non-reasoning models pass through untouched.
  */
 async function* stripReasoningPrefixStream(
   model: string,
@@ -102,21 +108,39 @@ async function* stripReasoningPrefixStream(
   }
   let pending = "";
   let released = false;
+  let inBlock = false;
   for await (const token of source) {
     if (released) {
       yield token;
       continue;
     }
     pending += token;
-    const match = REASONING_CLOSE_RE.exec(pending);
-    if (match) {
-      const tail = pending.slice(match.index + match[0].length);
-      released = true;
-      pending = "";
-      if (tail) yield tail;
+    const open = REASONING_OPEN_RE.exec(pending);
+    if (open) {
+      inBlock = true;
+      const head = pending.slice(0, open.index);
+      if (head) yield head;
+      pending = pending.slice(open.index);
+      const close = REASONING_CLOSE_RE.exec(pending);
+      if (close) {
+        inBlock = false;
+        released = true;
+        const tail = pending.slice(close.index + close[0].length);
+        pending = "";
+        if (tail) yield tail;
+      }
+      continue;
+    }
+    // No reasoning block opened — this is clean final-answer content. Stream
+    // it through with a small margin so an opening tag straddling a chunk
+    // boundary is still caught and stripped.
+    if (pending.length > STRIP_MARGIN) {
+      const head = pending.slice(0, pending.length - STRIP_MARGIN);
+      pending = pending.slice(-STRIP_MARGIN);
+      if (head) yield head;
     }
   }
-  if (!released) {
+  if (!released && !inBlock) {
     const remaining = stripReasoningOutput(pending);
     if (remaining) yield remaining;
   }
@@ -301,22 +325,28 @@ export class OllamaProvider implements AIProvider {
 
   private baseBody(
     options: GenerateTextOptions,
-    stream: boolean
+    stream: boolean,
+    model: string
   ): Record<string, unknown> {
+    // `think: false` is a no-op for Qwen3: it reasons anyway, but dumps the
+    // monologue inline in the content channel with a closing tag that only
+    // arrives after the whole generation — which forced the streaming strip to
+    // buffer every Qwen3 response in full, so the UI sat blank for the entire
+    // CPU-bound generation. Without the flag Qwen3 keeps its thinking on the
+    // hidden `message.reasoning` channel and streams the clean answer as it is
+    // generated (verified against Ollama directly). Other reasoning models
+    // (DeepSeek-R1 etc.) DO honor the flag, so it stays on for them.
+    const suppressThinking = !/qwen3/i.test(model);
     const body: Record<string, unknown> = {
-      model: "", // filled by caller after model resolution
+      model,
       messages: this.toOllamaMessages(options),
       stream,
       keep_alive: KEEP_ALIVE_MS,
-      // `think: false` + `enable_thinking: false` keeps Qwen3 from running a
-      // CPU-bound reasoning monologue; any leftover monologue is stripped from
-      // the content channel by stripReasoningOutput /
-      // stripReasoningPrefixStream before it can reach the UI.
-      think: false,
+      ...(suppressThinking ? { think: false } : {}),
       options: {
         temperature: options.temperature,
         num_predict: options.maxTokens,
-        enable_thinking: false,
+        ...(suppressThinking ? { enable_thinking: false } : {}),
       },
     };
     if (options.tools?.length) {
@@ -338,8 +368,7 @@ export class OllamaProvider implements AIProvider {
   async generateText(options: GenerateTextOptions): Promise<string> {
     const model = await this.resolveModel(false, options.model);
     const startedAt = Date.now();
-    const body = this.baseBody(options, false);
-    body.model = model;
+    const body = this.baseBody(options, false, model);
     const res = await fetchWithTimeout(
       `${this.baseUrl}/api/chat`,
       {
@@ -374,8 +403,7 @@ export class OllamaProvider implements AIProvider {
   ): Promise<ToolCallResponse> {
     const model = await this.resolveModel(false, options.model);
     const startedAt = Date.now();
-    const body = this.baseBody(options, false);
-    body.model = model;
+    const body = this.baseBody(options, false, model);
     const res = await fetchWithTimeout(
       `${this.baseUrl}/api/chat`,
       {
@@ -405,8 +433,7 @@ export class OllamaProvider implements AIProvider {
 
   async *streamText(options: GenerateTextOptions): AsyncGenerator<string> {
     const model = await this.resolveModel(false, options.model);
-    const body = this.baseBody(options, true);
-    body.model = model;
+    const body = this.baseBody(options, true, model);
     yield* this.streamResponse(body, options.signal);
   }
 

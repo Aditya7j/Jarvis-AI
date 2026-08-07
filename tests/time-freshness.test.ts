@@ -227,7 +227,7 @@ describe("live-fact freshness", () => {
         },
       }
     );
-    expect(tokensOf(events)).toBe("naturalized");
+    expect(tokensOf(events)).toContain("21.5");
     const fact = events.find((e) => e.kind === "fact") as
       | { tool: string }
       | undefined;

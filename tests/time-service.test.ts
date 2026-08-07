@@ -225,7 +225,7 @@ describe("TimeService — single source of truth", () => {
     const model = recordingModel(["Hey there"], (messages) => {
       captured = messages;
     });
-    const events = await collect("hey jarvis", model);
+    const events = await collect("hey jarvis, what can you do?", model);
     expect(tokensOf(events)).toBe("Hey there");
 
     const expected = getSystemClock();
@@ -239,8 +239,8 @@ describe("TimeService — single source of truth", () => {
     expect(text).toContain(expected.iso);
     expect(text).toContain(expected.date);
     expect(text).toContain(expected.timezone);
-    expect(text).toContain('"greeting": "Good afternoon"');
-    expect(text).toContain('"dayPart": "afternoon"');
+    expect(text).toContain('"greeting":"Good afternoon"');
+    expect(text).toContain('"dayPart":"afternoon"');
   });
 
   it("greeting varies with the hour inside the injected LLM context", async () => {
@@ -249,10 +249,10 @@ describe("TimeService — single source of truth", () => {
     const model = recordingModel(["ok"], (messages) => {
       captured = messages;
     });
-    await collect("hey jarvis", model);
+    await collect("hey jarvis, what can you do?", model);
     const system = captured.find(
       (m) => (m as { role?: string }).role === "system"
     ) as { content?: string } | undefined;
-    expect(system?.content ?? "").toContain('"greeting": "Good night"');
+    expect(system?.content ?? "").toContain('"greeting":"Good night"');
   });
 });

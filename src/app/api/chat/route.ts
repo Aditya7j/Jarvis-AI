@@ -81,11 +81,20 @@ function normalizeFrames(
       frames.push({ image, mimeType: vision.mimeType || "image/jpeg" });
     }
   }
-  // Order by descending encoded size: for a fixed resolution/quality the larger
-  // JPEG is the sharper, more detailed frame, so frames[0] (used for both the
-  // YOLO refresh and Gemma) is always the best candidate — never the newest
-  // merely because it is newest.
-  return frames.sort((a, b) => b.image.length - a.image.length);
+  // Order by newest capturedAt first: frames[0] (used for both the YOLO refresh
+  // and Gemma) must be the most recent client frame so stale, superseded frames
+  // never answer a question about "now". A frame with a missing timestamp loses
+  // to a timestamped one and, among untimestamped frames, the larger JPEG wins
+  // (sharper at fixed resolution).
+  return frames.sort((a, b) => {
+    const aHasTime = typeof a.capturedAt === "number";
+    const bHasTime = typeof b.capturedAt === "number";
+    if (aHasTime && bHasTime) {
+      return (b.capturedAt as number) - (a.capturedAt as number);
+    }
+    if (aHasTime !== bHasTime) return aHasTime ? -1 : 1;
+    return b.image.length - a.image.length;
+  });
 }
 
 /**
@@ -159,6 +168,7 @@ function toSSE(
             firstTokenAt = Date.now();
             log.info("Streaming started", {
               requestId,
+              stage: "sse_first_byte",
               ttftMs: firstTokenAt - startedAt,
             });
           }
@@ -174,6 +184,7 @@ function toSSE(
           );
           log.info("Streaming finished", {
             requestId,
+            stage: "sse_complete",
             chars,
             ttftMs: firstTokenAt !== null ? firstTokenAt - startedAt : null,
             totalMs: Date.now() - startedAt,

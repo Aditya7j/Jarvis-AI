@@ -4,6 +4,7 @@ import {
   type VisionAnalysisSummary,
 } from "@/lib/ai/prompts";
 import type { VisionDepth } from "@/lib/ai/vision-intent";
+import { getCurrentWaterfall } from "@/lib/metrics/waterfall";
 import { liveFrameKey, liveVisionEngine, LIVE_VISION_STALE_MS } from "./live-vision-engine";
 import { answerFromVisionCache } from "./vision-answer";
 import { visionCache, type CachedVisionResult } from "./vision-cache";
@@ -147,9 +148,12 @@ export async function resolveVisualQuestion(
   input: VisionManagerInput
 ): Promise<VisionResolution> {
   const { prompt, depth, visionState, frames } = input;
+  const wf = getCurrentWaterfall();
+  wf?.mark("vision_cache_lookup");
   const requestType = classifyRequestType(prompt, depth);
 
   if (visionState === "off") {
+    wf?.end("vision_cache_lookup");
     return {
       kind: "no-camera",
       text: NO_CAMERA_TEXT,
@@ -169,7 +173,21 @@ export async function resolveVisualQuestion(
       image: frame.image,
       capturedAt: frame.capturedAt,
     });
-    if (!liveVisionEngine.hasProcessedFrame(key)) {
+    // Stale-frame guard: never let an older client frame overwrite a newer
+    // analyzed frame already in the scene cache (fresh answer about "now").
+    const stateBefore = getVisionStateStore().getState();
+    const newestAnalyzedAt = stateBefore.latestFrame?.capturedAt;
+    const stale =
+      typeof frame.capturedAt === "number" &&
+      typeof newestAnalyzedAt === "number" &&
+      newestAnalyzedAt - frame.capturedAt > VISION_CACHE_FRAME_SKEW_MS;
+    if (stale) {
+      log.info("Skipping stale client frame refresh (newer frame already cached)", {
+        frameAt: frame.capturedAt,
+        cachedAt: newestAnalyzedAt,
+      });
+    } else if (!liveVisionEngine.hasProcessedFrame(key)) {
+      wf?.mark("yolo");
       await liveVisionEngine.analyzeFrame({
         image: frame.image,
         mimeType: frame.mimeType,
@@ -178,6 +196,8 @@ export async function resolveVisualQuestion(
         height: frame.height,
         capturedAt: frame.capturedAt,
       });
+      wf?.end("yolo");
+      wf?.count("yoloRuns");
     }
     age = cacheAgeMs();
   }
@@ -188,6 +208,7 @@ export async function resolveVisualQuestion(
   if (depth === "simple" && cacheHit) {
     const answer = answerFromVisionCache(prompt);
     if (!answer.needsGemma) {
+      wf?.end("vision_cache_lookup");
       return {
         kind: "cached",
         text: answer.text,
@@ -216,6 +237,7 @@ export async function resolveVisualQuestion(
       : null;
 
   if (!gemmaFrame) {
+    wf?.end("vision_cache_lookup");
     return {
       kind: "no-frame",
       text: NO_FRAME_TEXT,
@@ -230,6 +252,7 @@ export async function resolveVisualQuestion(
     cacheAgeMs: age,
     source: gemmaFrame.source ?? "scene-cache",
   });
+  wf?.end("vision_cache_lookup");
   return {
     kind: "gemma",
     frame: gemmaFrame,

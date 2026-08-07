@@ -156,14 +156,15 @@ describe("reliability regression", () => {
         geolocation: { granted: true, latitude: 28.6, longitude: 77.2 },
       },
     });
-    expect(tokensOf(events)).toBe("presented");
+    const text = tokensOf(events);
+    expect(text).toContain("21.5");
+    expect(text).toContain("partly cloudy");
+    // The verified fact is formatted deterministically — the model is skipped.
+    expect(seen).toBe("");
     const fact = events.find((e) => e.kind === "fact") as
       | { tool: string; subject: string }
       | undefined;
     expect(fact?.tool).toBe("get_weather");
-    // The verified fact must be handed to the LLM as the only source of truth.
-    expect(seen).toContain("21.5");
-    expect(seen).toContain("Partly cloudy");
     const toolEvent = events.find((e) => e.kind === "tool") as
       | { ok: boolean; tool: string }
       | undefined;
@@ -478,12 +479,20 @@ describe("reliability regression", () => {
 
 describe("planner tool-invocation (pipeline level)", () => {
   it.each(["hi", "hello", "hey jarvis", "good morning", "how are you", "thanks"])(
-    "%s runs the conversational LLM with zero tool events",
+    "%s answers with a canned localized reply — no tool, no model",
     async (prompt) => {
-      const events = await collect(prompt, fakeModel(["greeting"]));
+      let called = false;
+      const model: PipelineModel = {
+        streamText: async function* () {
+          called = true;
+          yield "greeting";
+        },
+      };
+      const events = await collect(prompt, model);
       expect(events.filter((e) => e.kind === "tool")).toHaveLength(0);
       expect(events.filter((e) => e.kind === "fact")).toHaveLength(0);
-      expect(tokensOf(events)).toBe("greeting");
+      expect(called).toBe(false);
+      expect(tokensOf(events).length).toBeGreaterThan(0);
     }
   );
 

@@ -319,8 +319,8 @@ describe("chat pipeline: language block reaches the LLM", () => {
   it("injects the Hindi instruction for Devanagari prompts", async () => {
     const store: AIMessageInput[] = [];
     const events = await collect(
-      "नमस्ते जार्विस",
-      [{ role: "user", content: "नमस्ते जार्विस" }],
+      "मुझे एक अच्छी किताब सुझाओ",
+      [{ role: "user", content: "मुझे एक अच्छी किताब सुझाओ" }],
       recordingModel(store)
     );
     expect(store[0].role).toBe("system");
@@ -331,8 +331,8 @@ describe("chat pipeline: language block reaches the LLM", () => {
   it("injects the Hinglish instruction for Roman-Hindi prompts", async () => {
     const store: AIMessageInput[] = [];
     await collect(
-      "kya haal hai",
-      [{ role: "user", content: "kya haal hai" }],
+      "mujhe ek acchi kahani sunao",
+      [{ role: "user", content: "mujhe ek acchi kahani sunao" }],
       recordingModel(store)
     );
     expect(store[0].role).toBe("system");

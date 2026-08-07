@@ -22,6 +22,7 @@ import {
 } from "@/lib/ai/prompts";
 import type { VisionDepth } from "@/lib/ai/vision-intent";
 import { CONFIDENCE_MID } from "@/lib/vision/confidence";
+import { getCurrentWaterfall } from "@/lib/metrics/waterfall";
 import { localizeReply } from "@/lib/lang/replies";
 import type { SpokenLanguage } from "@/lib/lang/detect";
 import { saveDebugFrame } from "@/lib/vision/debug-frame";
@@ -136,6 +137,9 @@ async function analyzeAndCachePlan(
   model: PipelineModel,
   signal?: AbortSignal
 ): Promise<VisionPlan> {
+  const wf = getCurrentWaterfall();
+  wf?.count("gemmaCalls");
+  wf?.mark("gemma");
   const run = beginVisionAnalysis(signal);
   try {
     const result = await analyzeNewestFrame(frame, model, run.signal);
@@ -171,6 +175,7 @@ async function analyzeAndCachePlan(
     });
     return { systemContext, summary };
   } finally {
+    wf?.end("gemma");
     run.done();
   }
 }
@@ -203,6 +208,7 @@ export async function resolveVisionPlan(
   input: VisionPlanInput
 ): Promise<VisionPlanResult> {
   const { prompt, depth, visionState, frames, model, signal, language } = input;
+  getCurrentWaterfall()?.count("visionCalls");
   const resolution = await resolveVisualQuestion({
     prompt,
     depth,

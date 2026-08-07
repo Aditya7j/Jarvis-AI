@@ -21,7 +21,10 @@ export type CannedReplyKey =
   | "visionCancelled"
   | "visionFailed"
   | "noCamera"
-  | "noFrame";
+  | "noFrame"
+  | "greeting"
+  | "casual"
+  | "howAreYou";
 
 type ReplyTable = Record<CannedReplyKey, string>;
 
@@ -45,6 +48,9 @@ const ENGLISH: ReplyTable = {
     "I can't see your camera feed — no camera or screen source is connected. Turn one on and ask me again.",
   noFrame:
     "I don't have a frame to look at right now — your camera is on but no video is coming through. Give it a moment and try again.",
+  greeting: "Hello! How can I help you today?",
+  casual: "Got it! Let me know if you need anything else.",
+  howAreYou: "I'm doing well, thank you! What can I help you with?",
 };
 
 const HINGLISH: ReplyTable = {
@@ -67,6 +73,9 @@ const HINGLISH: ReplyTable = {
     "Main aapka camera feed nahi dekh sakta — koi camera ya screen source connected nahi hai. On karo aur dobara poochho.",
   noFrame:
     "Mere paas abhi frame nahi hai — camera on hai par video aa nahi raha. Ek second rukkar dobara try karo.",
+  greeting: "Hello! Aaj main aapki kya help kar sakta hoon?",
+  casual: "Theek hai! Aur kuch chahiye to batao.",
+  howAreYou: "Main theek hoon, shukriya! Aapko kya chahiye?",
 };
 
 const HINDI: ReplyTable = {
@@ -89,6 +98,9 @@ const HINDI: ReplyTable = {
     "मैं आपका कैमरा फ़ीड नहीं देख सकता — कोई कैमरा या स्क्रीन स्रोत कनेक्ट नहीं है। इसे चालू करें और फिर से पूछें।",
   noFrame:
     "मेरे पास अभी कोई फ्रेम नहीं है — आपका कैमरा चालू है पर वीडियो आ नहीं रही। एक क्षण रुककर फिर प्रयास करें।",
+  greeting: "नमस्ते! आज मैं आपकी क्या मदद कर सकता हूँ?",
+  casual: "ठीक है! और कुछ चाहिए तो बताइए।",
+  howAreYou: "मैं ठीक हूँ, धन्यवाद! आपको क्या चाहिए?",
 };
 
 const TABLES: Record<SpokenLanguage, ReplyTable> = {
@@ -102,4 +114,28 @@ export function localizeReply(
   key: CannedReplyKey
 ): string {
   return TABLES[language][key];
+}
+
+/** Detects a "how are you"-style warmer check-in (deterministic, no LLM). */
+const HOW_ARE_YOU_PATTERNS: RegExp[] = [
+  /^\s*(?:how\s+are\s+you|how'?s\s+it\s+going|how\s+are\s+you\s+doing|how\s+have\s+you\s+been)\b/i,
+  /^\s*(?:kya\s+haal\s+(?:hai|hain)|kaise\s+ho|kaisi\s+ho|kaise\s+hain|aap\s+kaise\s+hain|kya\s+chal\s+raha\s+hai)\b/i,
+  /^\s*(?:क्या\s+हाल\s+है|कैसे\s+हो|आप\s+कैसे\s+हैं|क्या\s+हालचाल|कैसा\s+चल\s+रहा\s+है)/u,
+];
+
+/**
+ * Localized canned reply for greetings and casual conversation — the
+ * conversational fast path never reaches the LLM (< 100 ms). Callers pass
+ * `isGreeting` (from the planner's deterministic greeting detector).
+ */
+export function localizeConversationalReply(
+  language: SpokenLanguage,
+  prompt: string,
+  isGreeting: boolean
+): string {
+  if (HOW_ARE_YOU_PATTERNS.some((pattern) => pattern.test(prompt.trim()))) {
+    return localizeReply(language, "howAreYou");
+  }
+  if (isGreeting) return localizeReply(language, "greeting");
+  return localizeReply(language, "casual");
 }
