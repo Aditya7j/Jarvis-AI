@@ -1,5 +1,6 @@
 import type { FlagSighting, NamedColor } from "./detect/colors";
 import type { TrackedObject } from "./detect/tracker";
+import type { HeldCandidate } from "./hold-grounding";
 import type { OcrResult } from "./ocr";
 
 /**
@@ -23,6 +24,8 @@ export interface SceneObject extends TrackedObject {
 export interface ScenePerson extends TrackedObject {
   shirtColor?: NamedColor;
   heldHint?: string;
+  /** Padded hand/lap region (frame pixels) used for held-object detection. */
+  handRegion?: { x: number; y: number; width: number; height: number };
 }
 
 export interface FaceSighting {
@@ -74,6 +77,15 @@ export interface VisionStateSnapshot {
   frameId: number;
   /** Owning camera session. Answers from another session are never reused. */
   cameraSessionId: string | null;
+  /**
+   * Padded hand-region crop (JPEG data URL) of the newest frame when the
+   * detector gathered hand-region evidence. Sent to the focused VLM for
+   * "what am I holding?" so it inspects the actual hand region, never the
+   * whole scene.
+   */
+  heldCrop: string | null;
+  /** Detector evidence for the hand region of the newest frame (main + ROI). */
+  heldCandidates: HeldCandidate[] | null;
 }
 
 export interface SceneUpdateInput {
@@ -90,6 +102,8 @@ export interface SceneUpdateInput {
   stats?: Partial<VisionStats>;
   frameId?: number;
   cameraSessionId?: string | null;
+  heldCrop?: string | null;
+  heldCandidates?: HeldCandidate[] | null;
 }
 
 const EMPTY_STATS: VisionStats = {
@@ -122,6 +136,8 @@ class VisionStateStore {
     lastGemma: null,
     frameId: 0,
     cameraSessionId: null,
+    heldCrop: null,
+    heldCandidates: null,
   };
 
   update(input: SceneUpdateInput): VisionStateSnapshot {
@@ -154,6 +170,11 @@ class VisionStateStore {
         input.cameraSessionId !== undefined
           ? input.cameraSessionId
           : this.state.cameraSessionId,
+      heldCrop: input.heldCrop !== undefined ? input.heldCrop : this.state.heldCrop,
+      heldCandidates:
+        input.heldCandidates !== undefined
+          ? input.heldCandidates
+          : this.state.heldCandidates,
     };
     return this.state;
   }
@@ -177,6 +198,8 @@ class VisionStateStore {
       lastGemma: null,
       frameId: 0,
       cameraSessionId: null,
+      heldCrop: null,
+      heldCandidates: null,
     };
   }
 

@@ -311,6 +311,98 @@ describe("sound effects layer", () => {
     fx.play("wake");
     expect(fakeContext.resume).toHaveBeenCalled();
   });
+
+  it("never schedules a buffer source until the suspended context has resumed", async () => {
+    const windowStub = makeWindow();
+    vi.stubGlobal("window", windowStub);
+    const fakeContext = new FakeAudioContext();
+    (fakeContext as { state: string }).state = "suspended";
+
+    let resolveResume!: () => void;
+    fakeContext.resume = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveResume = resolve;
+        })
+    ) as unknown as typeof fakeContext.resume;
+    windowStub.AudioContext = vi.fn(function AudioContext() {
+      return fakeContext;
+    });
+    vi.stubGlobal(
+      "Audio",
+      vi.fn(function Audio(_url?: string) {
+        return new FakeAudioElement();
+      })
+    );
+
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      arrayBuffer: async () => new ArrayBuffer(8),
+    })) as unknown as typeof fetch;
+
+    const fx = createSoundFX({ fetchImpl });
+    fx.preload();
+    await flush();
+    await flush();
+
+    // Scheduling a source on the still-suspended context is exactly the bug:
+    // the async resume() races the start and the sound is silently dropped.
+    fakeContext.source.start.mockClear();
+    fx.play("wake");
+    expect(fakeContext.resume).toHaveBeenCalled();
+    expect(fakeContext.source.start).not.toHaveBeenCalled();
+
+    // Only after the context is actually running is playback scheduled.
+    resolveResume();
+    await flush();
+    expect(fakeContext.source.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("unlocks a suspended context on the first pointerdown gesture", async () => {
+    const listeners = new Map<string, () => void>();
+    const windowStub = makeWindow() as WindowStub & {
+      addEventListener: ReturnType<typeof vi.fn>;
+      removeEventListener: ReturnType<typeof vi.fn>;
+    };
+    windowStub.addEventListener = vi.fn((type: string, fn: () => void) => {
+      listeners.set(type, fn);
+    });
+    windowStub.removeEventListener = vi.fn();
+    vi.stubGlobal("window", windowStub);
+
+    const fakeContext = new FakeAudioContext();
+    (fakeContext as { state: string }).state = "suspended";
+    fakeContext.resume = vi.fn(async () => {
+      (fakeContext as { state: string }).state = "running";
+    }) as unknown as typeof fakeContext.resume;
+    windowStub.AudioContext = vi.fn(function AudioContext() {
+      return fakeContext;
+    });
+    vi.stubGlobal(
+      "Audio",
+      vi.fn(function Audio(_url?: string) {
+        return new FakeAudioElement();
+      })
+    );
+
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      arrayBuffer: async () => new ArrayBuffer(8),
+    })) as unknown as typeof fetch;
+
+    const fx = createSoundFX({ fetchImpl });
+    fx.preload();
+    await flush();
+    await flush();
+
+    // Simulate the user's first interaction (any click / tap / key).
+    listeners.get("pointerdown")?.();
+    expect(fakeContext.resume).toHaveBeenCalledTimes(1);
+
+    // The unlock is one-shot: a second gesture must not re-resume.
+    listeners.get("pointerdown")?.();
+    expect(fakeContext.resume).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("state transition → sound mapping", () => {

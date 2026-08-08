@@ -42,6 +42,10 @@ export interface VisionRequest {
   prompt?: string;
   model?: string;
   signal?: AbortSignal;
+  /** Bounded output budget for the vision call (num_predict). Without this,
+   * Ollama defaults to the model's full context and generates for minutes on
+   * slow hardware even though the JSON answers are ~100-400 tokens. */
+  maxTokens?: number;
 }
 
 export interface VisionImage {

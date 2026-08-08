@@ -21,6 +21,13 @@ export interface SimpleVisionAnswer {
   needsGemma: boolean;
   /** True when the answer came from the vision-state cache (no LLM involved). */
   fromCache: boolean;
+  /**
+   * When the Scene Cache cannot answer an attribute question (held object or
+   * shirt colour not established by YOLO), the caller MAY run ONE bounded,
+   * focused VLM call on the newest frame. Simple questions never block on the
+   * VLM for anything else.
+   */
+  escalation?: "holding" | "wearing";
 }
 
 const FLAG_HIGH_CONFIDENCE = 0.7;
@@ -159,7 +166,7 @@ export function answerFromVisionCache(prompt: string): SimpleVisionAnswer {
   }
 
   // --- "Can you see me?" / presence of any person ---
-  if (/\b(do|can|could|did|are|will)\s+you\s+see\s+(me|us|anyone|anybody|someone)\b/.test(p)) {
+  if (/\b(do|can|could|did|are|will)\s+(you|u)\s+see\s+(me|us|anyone|anybody|someone)\b/.test(p)) {
     if (people > 0) {
       return finalize(
         "Yes, I can see you.",
@@ -209,11 +216,17 @@ export function answerFromVisionCache(prompt: string): SimpleVisionAnswer {
         confidence
       );
     }
+    // YOLO has no held-object for this frame. Escalate to ONE bounded, focused
+    // VLM call on the newest frame so "what am I holding?" is actually answered
+    // instead of instantly guessing. The caller degrades to this honest text if
+    // the VLM cannot answer within the interactive budget — it never invents a
+    // held object from generic scene detections.
     return {
-      text: "I can't tell what you're holding right now.",
+      text: "I can't identify the object clearly from the current frame.",
       confidence: 55,
-      needsGemma: false,
-      fromCache: true,
+      needsGemma: true,
+      escalation: "holding",
+      fromCache: false,
     };
   }
 
@@ -231,9 +244,16 @@ export function answerFromVisionCache(prompt: string): SimpleVisionAnswer {
     const sentence = clothingSentence(state);
     if (!sentence) {
       // A person is visible but YOLO hasn't established a shirt colour. YOLO
-      // must never guess an attribute it didn't detect — Gemma (which can read
-      // colour from the frame) is the only allowed escalation for clothing.
-      return { text: "", confidence: 0, needsGemma: true, fromCache: false };
+      // must never guess an attribute it didn't detect — one bounded, focused
+      // VLM call on the newest frame is the only allowed escalation, and it
+      // degrades to this honest text when the VLM cannot answer in time.
+      return {
+        text: "I can see you, but I can't make out what you're wearing clearly yet.",
+        confidence: 40,
+        needsGemma: true,
+        escalation: "wearing",
+        fromCache: false,
+      };
     }
     return finalize(sentence, 85);
   }
@@ -285,8 +305,27 @@ export function answerFromVisionCache(prompt: string): SimpleVisionAnswer {
     }
   }
 
-  // Fall through: needs reasoning/detail we cannot produce from YOLO alone.
-  return { text: "", confidence: 0, needsGemma: true, fromCache: false };
+  // Fall through: the cache always has something grounded to say for a simple
+  // question — a scene list. Simple questions NEVER block on the VLM for gaps
+  // the detector cannot answer; the Scene Cache is the single source of truth.
+  const listed = formatObjectList(
+    visible.map((item) => ({ name: item.name, count: item.count })),
+    people
+  );
+  if (!listed) {
+    return {
+      text: "I can't see anything clearly right now.",
+      confidence: 40,
+      needsGemma: false,
+      fromCache: true,
+    };
+  }
+  return {
+    text: `I can see ${listed}.`,
+    confidence: 75,
+    needsGemma: false,
+    fromCache: true,
+  };
 }
 
 /** Whether the vision-state cache currently has usable data (frame analyzed recently). */

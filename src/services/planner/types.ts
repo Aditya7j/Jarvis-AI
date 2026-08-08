@@ -26,6 +26,7 @@ export type PlanClass =
   | "vision" // camera/screen content — vision pipeline
   | "time" // current time — get_current_time
   | "date" // today's date / day of week — get_current_time
+  | "date-calc" // weekday/days of a SPECIFIC date — get_weekday_for_date (never the LLM)
   | "weather" // current conditions — get_weather
   | "location" // where the user is — browser geolocation
   | "calendar" // schedule/appointments — get_calendar
@@ -113,4 +114,5 @@ export const DIRECT_CLASSES: ReadonlySet<PlanClass> = new Set([
   "conversion",
   "time",
   "date",
+  "date-calc",
 ]);

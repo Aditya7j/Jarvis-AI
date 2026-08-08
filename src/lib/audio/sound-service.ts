@@ -194,12 +194,40 @@ export class SoundFX {
         this.ctx = null;
         return;
       }
+      this.unlockOnFirstGesture();
       await Promise.allSettled(
         (SOUND_EVENTS as readonly SoundEvent[]).map((event) =>
           this.loadBuffer(event)
         )
       );
     })();
+  }
+
+  /**
+   * Browsers suspend a freshly-created AudioContext until the first user
+   * gesture, and a `resume()` called outside a gesture is silently ignored.
+   * The FIRST interaction (click/tap/key) is the moment we are allowed to
+   * resume, so unlock the context as early as possible — a user who clicks
+   * "Test" as their very first action gets instant audio instead of a
+   * resume-vs-schedule race dropping the sound.
+   */
+  private unlockOnFirstGesture(): void {
+    if (
+      typeof window === "undefined" ||
+      typeof window.addEventListener !== "function"
+    ) {
+      return;
+    }
+    const unlock = () => {
+      const ctx = this.ctx;
+      if (ctx && ctx.state === "suspended") {
+        void ctx.resume().catch(() => {});
+      }
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+    window.addEventListener("pointerdown", unlock, { once: true });
+    window.addEventListener("keydown", unlock, { once: true });
   }
 
   private async loadBuffer(event: SoundEvent): Promise<void> {
@@ -234,6 +262,12 @@ export class SoundFX {
   /**
    * Play a sound effect. Synchronous, non-blocking: it returns immediately and
    * the audio is scheduled on the Web Audio graph (or an <audio> fallback).
+   *
+   * Scheduling a buffer source on a context that is still `suspended` races the
+   * asynchronous `resume()` and silently drops the sound on some browsers, so
+   * playback is scheduled only AFTER the context is actually running. The
+   * resume-then-schedule work runs in the background and never blocks the
+   * caller (the settings "Test" button and every state-transition cue).
    */
   play(event: SoundEvent): void {
     if (!this.enabled) return;
@@ -243,24 +277,41 @@ export class SoundFX {
     const buffer = this.buffers.get(event);
     const ctx = this.ctx;
     if (buffer && ctx) {
-      if (ctx.state === "suspended") {
-        void ctx.resume().catch(() => {});
-      }
-      try {
-        const source = ctx.createBufferSource();
-        source.buffer = buffer;
-        const gain = ctx.createGain();
-        gain.gain.value = this.volume;
-        source.connect(gain);
-        gain.connect(ctx.destination);
-        source.start(0);
-        return;
-      } catch {
-        // fall through to the <audio> fallback if the graph throws
-      }
+      void this.playBuffered(ctx, buffer, event);
+      return;
     }
 
-    // Fallback for browsers without Web Audio: a pre-primed <audio> element.
+    // Fallback for browsers without Web Audio (or before buffers decode):
+    // a fresh <audio> element still works inside the triggering user gesture.
+    this.playFallbackAudio(event);
+  }
+
+  private async playBuffered(
+    ctx: AudioContext,
+    buffer: AudioBuffer,
+    event: SoundEvent
+  ): Promise<void> {
+    try {
+      if (ctx.state === "suspended") {
+        await ctx.resume();
+      }
+      if (ctx.state === "closed") {
+        this.playFallbackAudio(event);
+        return;
+      }
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      const gain = ctx.createGain();
+      gain.gain.value = this.volume;
+      source.connect(gain);
+      gain.connect(ctx.destination);
+      source.start(0);
+    } catch {
+      this.playFallbackAudio(event);
+    }
+  }
+
+  private playFallbackAudio(event: SoundEvent): void {
     try {
       const el = new Audio(SOUND_FILES[event]);
       el.volume = this.volume;

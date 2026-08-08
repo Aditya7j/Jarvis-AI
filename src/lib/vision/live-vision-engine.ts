@@ -4,10 +4,22 @@ import {
   type VisionAnalysisSummary,
   type VisionStructuredAnalysis,
 } from "@/lib/ai/prompts";
-import { SMALL_OBJECT_CLASSES } from "./detect/coco-classes";
 import { detectTricolorFlag, sampleBoxColor, sampleRegion, type NamedColor } from "./detect/colors";
 import { ByteTrackLite } from "./detect/tracker";
 import { getSharedDetector, type YoloResult } from "./detect/yolo-detector";
+import {
+  HELD_DESK_STRIP_FRACTION,
+  pickHeldObject,
+  qualifyHeldCandidates,
+  type HeldCandidate,
+} from "./hold-grounding";
+import {
+  QUALITY_MAX_AGE_MS,
+  pickBestFrame,
+  scoreFrameQuality,
+  type BufferedVisionFrame,
+  type FrameQualityScore,
+} from "./frame-quality";
 import { getOcrEngine, isOcrAvailable } from "./ocr";
 import { visionCache } from "./vision-cache";
 import {
@@ -50,7 +62,7 @@ import { randomUUID } from "node:crypto";
 export const LIVE_VISION_STALE_MS = 1000;
 export const LIVE_VISION_RESULT_TTL_MS = 5000;
 export const LIVE_VISION_SUBMIT_DEBOUNCE_MS = 200;
-const ROI_CONF_THRESHOLD = 0.2;
+const ROI_CONF_THRESHOLD = 0.12;
 const MIN_PERSON_HEIGHT_FOR_COLOR = 60;
 const FLAG_CHECK_EVERY = 6;
 const OCR_CHECK_EVERY = 12;
@@ -138,6 +150,8 @@ export interface PipelineTimeline {
   yoloRoiMs: number;
   /** HSV colour sampling (shirt + objects). */
   colorMs: number;
+  /** blur/brightness quality scan. */
+  qualityMs: number;
   /** vision-state (Scene Cache) update. */
   cacheUpdateMs: number;
   /** full pipeline. */
@@ -175,10 +189,19 @@ interface LiveEngineStore {
   colorVotes: Map<number, Map<string, number>>;
   /** Per-trackingId last established (stabilized) colour. */
   colorCache: Map<number, NamedColor>;
+  /** Held-label support votes across recent frames (ROI consensus). */
+  heldVotes: Map<string, number>;
+  /** Rolling buffer of the most recent analyzed frames + their quality/evidence. */
+  frameBuffer: BufferedVisionFrame[];
 }
 
 const STORE_KEY = "__jarvis_live_vision_engine__";
 const log = aiLogger.child("live-vision");
+
+/** Max frames retained in the best-frame buffer. */
+const FRAME_BUFFER_MAX = 5;
+/** Older buffered frames are dropped when pruning. */
+const FRAME_BUFFER_MAX_AGE_MS = 5000;
 
 let pipelineBusy = false;
 
@@ -217,6 +240,8 @@ function getStore(): LiveEngineStore {
     lastTimeline: null,
     colorVotes: new Map(),
     colorCache: new Map(),
+    heldVotes: new Map(),
+    frameBuffer: [],
   };
   Object.defineProperty(g, STORE_KEY, {
     value: store,
@@ -247,6 +272,27 @@ function frameKey(frame: LiveFrameInput): string {
 function toDataUrl(image: string, mimeType?: string): string {
   const mime = mimeType || "image/jpeg";
   return image.startsWith("data:") ? image : `data:${mime};base64,${image}`;
+}
+
+/**
+ * Padded hand/lap region of a person box (frame pixels). This is the region
+ * that is cropped for the high-res ROI re-detect AND handed to the focused VLM,
+ * so the two always inspect exactly the same pixels. Started at 35% of the
+ * person's height the crop missed a phone held up near the chest/face (the ROI
+ * came back empty); it now starts at 25% so a chest/face-held object still
+ * falls inside while the bottom desk/floor strip stays excluded from "held".
+ */
+function handRegionFor(person: { x: number; y: number; width: number; height: number }): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  const x0 = person.x + person.width * 0.15;
+  const y0 = person.y + person.height * 0.25;
+  const x1 = person.x + person.width * 0.85;
+  const y1 = person.y + person.height;
+  return { x: x0, y: y0, width: Math.max(1, x1 - x0), height: Math.max(1, y1 - y0) };
 }
 
 function yoloFps(times: number[]): number {
@@ -369,6 +415,7 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
     yoloMainMs: 0,
     yoloRoiMs: 0,
     colorMs: 0,
+    qualityMs: 0,
     cacheUpdateMs: 0,
     totalMs: 0,
   };
@@ -399,6 +446,26 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
   }
   timeline.preprocessMs = performance.now() - tPre;
 
+  // --- Frame quality scan (blur / brightness) ---
+  // Cheap (~1-3ms, <=96px downscale + Laplacian variance) and runs inside the
+  // pipeline so the request hot path never pays for it. The score feeds the
+  // best-frame selector: a blurry newest frame is never sent to the VLM when a
+  // sharper recent frame exists.
+  const tQuality = performance.now();
+  let quality: FrameQualityScore = {
+    sharpness: 0,
+    brightness: 0,
+    score: 0,
+    usable: false,
+    reason: "decode-failed",
+  };
+  try {
+    quality = await scoreFrameQuality(rgb, width, height);
+  } catch {
+    // keep the unusable default; selection falls back to the newest scene frame
+  }
+  timeline.qualityMs = performance.now() - tQuality;
+
   // --- Main YOLO pass ---
   let main: YoloResult;
   const tMain = performance.now();
@@ -413,25 +480,34 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
 
   const inferenceMs = main.inferenceMs;
 
+  // --- Person shirt colour (HSV) ---
+  const mainPersons = main.detections
+    .filter((det) => det.label === "person" && det.confidence >= 0.3)
+    .sort((a, b) => b.confidence - a.confidence);
+
   // --- ROI high-resolution re-detect on each person's hand region ---
-  const roiDetections: { label: string; confidence: number; x: number; y: number; width: number; height: number }[] = [];
+  const roiDetections: {
+    label: string;
+    confidence: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    inDesk: boolean;
+  }[] = [];
+  let roiRuns = 0;
   let roiHits = 0;
+  let roiCrop: { width: number; height: number } | null = null;
   const tRoi = performance.now();
   for (const det of main.detections) {
     if (det.label !== "person" || det.confidence < 0.3) continue;
     const box = det.box;
     if (box.width < 20 || box.height < 60) continue;
-    const roiX0 = Math.max(0, box.x + box.width * 0.2);
-    const roiY0 = Math.max(0, box.y + box.height * 0.45);
-    const roiW = Math.min(width - roiX0, box.width * 0.6);
-    const roiH = Math.min(height - roiY0, box.height * 0.45);
-    if (roiW < 16 || roiH < 16) continue;
-    const crop = detector.cropRgb({ rgb, width, height }, {
-      x: roiX0,
-      y: roiY0,
-      width: roiW,
-      height: roiH,
-    });
+    const region = handRegionFor(box);
+    if (region.width < 16 || region.height < 16) continue;
+    const crop = detector.cropRgb({ rgb, width, height }, region);
+    roiCrop = { width: crop.width, height: crop.height };
+    roiRuns += 1;
     let roiRun: YoloResult;
     try {
       roiRun = await detector.detectRgb(crop, { confThreshold: ROI_CONF_THRESHOLD });
@@ -440,23 +516,25 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
     }
     for (const roiDet of roiRun.detections) {
       if (roiDet.label === "person") continue;
+      const absX = region.x + roiDet.box.x;
+      const absY = region.y + roiDet.box.y;
+      const centerY = absY + roiDet.box.height / 2;
+      const inDesk =
+        region.height > 0 &&
+        (centerY - region.y) / region.height >= HELD_DESK_STRIP_FRACTION;
       roiDetections.push({
         label: roiDet.label,
         confidence: roiDet.confidence,
-        x: roiX0 + roiDet.box.x,
-        y: roiY0 + roiDet.box.y,
+        x: absX,
+        y: absY,
         width: roiDet.box.width,
         height: roiDet.box.height,
+        inDesk,
       });
       roiHits += 1;
     }
   }
   timeline.yoloRoiMs = performance.now() - tRoi;
-
-  // --- Person shirt colour (HSV) ---
-  const mainPersons = main.detections
-    .filter((det) => det.label === "person" && det.confidence >= 0.3)
-    .sort((a, b) => b.confidence - a.confidence);
 
   // --- Tracking ---
   const store = getStore();
@@ -470,6 +548,7 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
   for (const track of tracked) {
     if (track.label === "person") {
       const person: ScenePerson = { ...track };
+      person.handRegion = handRegionFor(track.box);
       if (track.box.height >= MIN_PERSON_HEIGHT_FOR_COLOR) {
         const sampled = sampleRegion(
           { data: rgb, width, height },
@@ -513,33 +592,72 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
   pruneColors(store, new Set(tracked.map((track) => track.trackingId)));
   timeline.colorMs = performance.now() - tColor;
 
-  // --- Held object resolution (ROI wins, then near-person small objects) ---
-  let heldObject: { label: string; confidence: number } | null = null;
-  const sortedRoi = [...roiDetections].sort((a, b) => b.confidence - a.confidence);
-  if (sortedRoi.length > 0) {
-    const best = sortedRoi[0];
-    if (best.confidence >= 0.2) {
-      heldObject = { label: best.label, confidence: best.confidence };
+  // --- Held object resolution: grounded in the frame, consensus-protected ---
+  // A main-pass small object whose centre is inside the person's hand region is
+  // direct YOLO evidence and wins immediately. ROI-only detections need 2-of-3
+  // frame consensus so a single-frame false positive (e.g. a mug on the desk)
+  // is never reported as held.
+  const handRegion = scenePeople[0]?.handRegion ?? null;
+  const rawCandidates: HeldCandidate[] = [];
+  for (const track of tracked) {
+    if (track.label === "person" || track.confidence < 0.3) continue;
+    const centerX = track.box.x + track.box.width / 2;
+    const centerY = track.box.y + track.box.height / 2;
+    const inHandRegion =
+      !!handRegion &&
+      centerX >= handRegion.x &&
+      centerX <= handRegion.x + handRegion.width &&
+      centerY >= handRegion.y &&
+      centerY <= handRegion.y + handRegion.height;
+    if (inHandRegion) {
+      const inDeskStrip =
+        !!handRegion &&
+        handRegion.height > 0 &&
+        (centerY - handRegion.y) / handRegion.height >= HELD_DESK_STRIP_FRACTION;
+      rawCandidates.push({
+        label: track.label,
+        confidence: track.confidence,
+        source: "main",
+        inHandRegion,
+        inDeskStrip,
+      });
     }
   }
-  if (!heldObject && mainPersons.length > 0) {
-    const personBox = mainPersons[0].box;
-    const candidates = tracked.filter(
-      (track) =>
-        track.label !== "person" &&
-        track.confidence >= 0.3 &&
-        track.box.x + track.box.width / 2 >= personBox.x &&
-        track.box.x + track.box.width / 2 <= personBox.x + personBox.width &&
-        track.box.y + track.box.height / 2 >= personBox.y + personBox.height * 0.4 &&
-        track.box.y + track.box.height / 2 <= personBox.y + personBox.height,
-    );
-    if (candidates.length > 0) {
-      const best = candidates.sort((a, b) => b.confidence - a.confidence)[0];
-      heldObject = { label: best.label, confidence: best.confidence };
-    }
+  for (const roiDet of roiDetections) {
+    rawCandidates.push({
+      label: roiDet.label,
+      confidence: roiDet.confidence,
+      source: "roi",
+      inHandRegion: true,
+      inDeskStrip: roiDet.inDesk,
+    });
   }
-  if (heldObject && !SMALL_OBJECT_CLASSES.has(heldObject.label)) {
-    heldObject = null;
+  // Only qualified candidates count as evidence / can become the held object
+  // (small class, hands zone, >= HELD_HAND_CONFIDENCE). This is the SAME set
+  // stored to the Scene Cache, so the focused VLM can never confirm a weak or
+  // desk-strip detection.
+  const heldCandidates = qualifyHeldCandidates(rawCandidates);
+  const heldPicked = pickHeldObject(heldCandidates, store.heldVotes);
+  const heldObject: { label: string; confidence: number } | null = heldPicked
+    ? { label: heldPicked.label, confidence: heldPicked.confidence }
+    : null;
+
+  // Padded hand-region crop of the newest frame — the exact pixels the ROI
+  // pass inspected. Sent to the focused VLM for holding questions so it never
+  // scans the whole scene for a "held" object.
+  let heldCrop: string | null = null;
+  if (handRegion && heldCandidates.length > 0) {
+    try {
+      const crop = detector.cropRgb({ rgb, width, height }, handRegion);
+      const jpeg = await sharp(crop.rgb, {
+        raw: { width: crop.width, height: crop.height, channels: 3 },
+      })
+        .jpeg({ quality: 75 })
+        .toBuffer();
+      heldCrop = toDataUrl(jpeg.toString("base64"), "image/jpeg");
+    } catch {
+      heldCrop = null;
+    }
   }
 
   // --- Optional OCR (pluggable, off by default) ---
@@ -576,6 +694,8 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
     scene,
     confidence: maxConf,
     heldObject,
+    heldCrop,
+    heldCandidates,
     flag,
     faces: scenePeople.map(
       (p): FaceSighting => ({
@@ -592,13 +712,35 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
       yoloFps: yoloFps(store.recentInferenceMs),
       lastError: null,
       source: "yolo-onnx",
-      roiRuns: 0,
+      roiRuns,
       roiHits,
     },
     frameId,
     cameraSessionId: store.cameraSessionId,
   });
   timeline.cacheUpdateMs = performance.now() - tCache;
+
+  // --- Rolling best-frame buffer ---
+  // Keep the most recent analyzed frames together with each frame's OWN
+  // hand-region evidence so the best-frame selector can hand the VLM a sharp
+  // older frame whose grounding (crop + candidates) always matches it.
+  store.frameBuffer.push({
+    frameId,
+    capturedAt: visionFrame.capturedAt,
+    image: visionFrame.buffer,
+    width,
+    height,
+    quality,
+    heldCandidates: heldCandidates.length > 0 ? heldCandidates : null,
+    heldCrop,
+    handRegion,
+    hasPerson: scenePeople.length > 0,
+  });
+  const nowTime = Date.now();
+  store.frameBuffer = store.frameBuffer
+    .filter((entry) => nowTime - entry.capturedAt <= FRAME_BUFFER_MAX_AGE_MS)
+    .sort((a, b) => b.capturedAt - a.capturedAt)
+    .slice(0, FRAME_BUFFER_MAX);
 
   // --- Diff new / gone objects (by label) ---
   const currentNames = tracked.map((track) => track.label);
@@ -665,8 +807,19 @@ async function runPipeline(frame: LiveFrameInput): Promise<PipelineOutcome> {
   timeline.totalMs = pipelineMs;
   store.lastTimeline = timeline;
   log.info(
-    `[YOLO] #${result.seq} · pipe ${pipelineMs.toFixed(1)}ms = decode ${timeline.preprocessMs.toFixed(1)} + yolo ${timeline.yoloMainMs.toFixed(1)} + roi ${timeline.yoloRoiMs.toFixed(1)} + color ${timeline.colorMs.toFixed(1)} + cache ${timeline.cacheUpdateMs.toFixed(1)} · objects ${objects.length} · roi ${roiDetections.length} · new ${newObjects.join(",") || "none"} · gone ${goneObjects.join(",") || "none"}`
+    `[YOLO] #${result.seq} · pipe ${pipelineMs.toFixed(1)}ms = decode ${timeline.preprocessMs.toFixed(1)} + yolo ${timeline.yoloMainMs.toFixed(1)} + roi ${timeline.yoloRoiMs.toFixed(1)} + color ${timeline.colorMs.toFixed(1)} + quality ${timeline.qualityMs.toFixed(1)} + cache ${timeline.cacheUpdateMs.toFixed(1)} · objects ${objects.length} · roi ${roiDetections.length}/${roiRuns} (${roiCrop ? `${roiCrop.width}x${roiCrop.height}` : "n/a"}) · held ${heldObject ? heldObject.label : "-"} · quality ${quality.usable ? "ok" : quality.reason} · new ${newObjects.join(",") || "none"} · gone ${goneObjects.join(",") || "none"}`
   );
+  if (roiDetections.length > 0) {
+    log.info("[ROI] detections", {
+      seq: result.seq,
+      crop: roiCrop ? `${roiCrop.width}x${roiCrop.height}` : null,
+      detections: roiDetections.map((d) => ({
+        label: d.label,
+        confidence: Math.round(d.confidence * 100) / 100,
+        inDesk: d.inDesk,
+      })),
+    });
+  }
   return { ok: true, result, inferenceMs, pipelineMs };
 }
 
@@ -740,6 +893,50 @@ export function currentCameraSessionId(): string | null {
   return getStore().cameraSessionId;
 }
 
+export interface BufferedFrameInfo {
+  frameId: number;
+  ageMs: number;
+  sharpness: number;
+  brightness: number;
+  score: number;
+  usable: boolean;
+  reason: string | null;
+}
+
+/** Quality snapshot of every retained buffered frame, oldest -> newest. */
+export function getBufferedFrameCandidates(): BufferedFrameInfo[] {
+  const now = Date.now();
+  return [...getStore().frameBuffer]
+    .sort((a, b) => a.capturedAt - b.capturedAt)
+    .map((entry) => ({
+      frameId: entry.frameId,
+      ageMs: now - entry.capturedAt,
+      sharpness: entry.quality.sharpness,
+      brightness: entry.quality.brightness,
+      score: entry.quality.score,
+      usable: entry.quality.usable,
+      reason: entry.quality.reason,
+    }));
+}
+
+/**
+ * The best current frame for VLM analysis: the newest sufficiently-sharp frame
+ * in the rolling buffer (stale / blurry / dark frames are skipped). Returns the
+ * full buffered entry — including that frame's OWN hand-region evidence — so
+ * grounding always matches the frame that is actually analyzed. Null when no
+ * retained frame passes the quality gate (caller falls back to the newest
+ * scene frame as a last resort, but the rejection is logged).
+ */
+export function selectBestBufferedFrame(
+  maxAgeMs = QUALITY_MAX_AGE_MS
+): BufferedVisionFrame | null {
+  const store = getStore();
+  if (store.frameBuffer.length === 0) return null;
+  const best = pickBestFrame(store.frameBuffer, Date.now(), maxAgeMs);
+  if (!best) return null;
+  return store.frameBuffer.find((entry) => entry.frameId === best.frameId) ?? null;
+}
+
 export const liveVisionEngine = {
   /**
    * Mark the session active so the engine keeps accepting frames. Starting a
@@ -764,6 +961,8 @@ export const liveVisionEngine = {
     store.recentPipelineMs = [];
     store.colorVotes.clear();
     store.colorCache.clear();
+    store.heldVotes.clear();
+    store.frameBuffer = [];
     store.modelReady = false;
     store.modelError = null;
     store.lastError = null;
@@ -800,6 +999,8 @@ export const liveVisionEngine = {
     store.recentPipelineMs = [];
     store.colorVotes.clear();
     store.colorCache.clear();
+    store.heldVotes.clear();
+    store.frameBuffer = [];
     getVisionStateStore().reset();
     visionCache.clear();
     log.info("Live vision session stopped");

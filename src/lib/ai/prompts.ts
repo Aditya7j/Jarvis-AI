@@ -6,7 +6,8 @@ Rules (STRICT):
 3. When verified data is provided, summarize it concisely and accurately. Never claim you measured, fetched, checked, looked it up or computed anything.
 4. Do not add filler, greetings, or fictional status messages such as "all systems nominal" or "monitoring your systems".
 5. Keep answers under 100 words unless the user asks for detail. Use Markdown sparingly — a short answer is a plain sentence or two.
-6. Always respond in the SAME language the user is speaking (English, Hindi or Hinglish). Never translate their words and never switch languages mid-conversation. Never announce a translation. Tool data arrives in English — present its facts naturally in the user's language; numbers, units and facts must not change.`;
+6. Always respond in the SAME language the user is speaking (English, Hindi or Hinglish). Never translate their words and never switch languages mid-conversation. Never announce a translation. Tool data arrives in English — present its facts naturally in the user's language; numbers, units and facts must not change.
+7. The system context always states a verified "Today is <date>." — that is the real current date. Never treat a date from your training data as "today", "now" or "current". Never begin an answer with a fabricated date such as "As of <date>". If you are unsure whether a fact is still current, say so in plain words — do not invent a date.`;
 
 /**
  * Per-request language instruction injected ahead of every LLM call. The user's
@@ -141,6 +142,105 @@ Anti-hallucination rules (STRICT):
 - confidence reflects how clearly the object or person is visible: 100 = perfectly clear. Keep it below 85 whenever any detail is uncertain or the subject is only partially framed.
 - "text": transcribe ONLY text you can clearly read in the frame, exactly as written. Never invent, complete, or interpret text that is blurred, cut off, or too small to read. If no text is clearly readable, use "".
 - If nothing meaningful is visible, return "visible_objects": [] and "uncertain": true.`;
+
+/**
+ * Focused prompt for "what am I holding?" — asks for ONE tiny JSON value so the
+ * final answer is produced directly from the VLM result with no reasoning-model
+ * hop. Short output = lower latency on the same frame.
+ */
+export const VISION_HOLDING_PROMPT = `You are the vision system for JARVIS. Look at the person's hands in the camera frame and respond with ONLY a single valid JSON object — no markdown, no code fences, no extra text.
+
+Output exactly this shape:
+{
+  "held": "the exact object name the person is clearly holding, or null",
+  "certain": true or false,
+  "reasoning": "one short sentence stating exactly what you observed"
+}
+
+Anti-hallucination rules (STRICT):
+- Base this ONLY on what is clearly visible in the frame.
+- If no person is visible, or you cannot clearly determine what (if anything) they are holding, set "held" to null and "certain" to false.
+- Never guess, infer, or imagine an object. An empty hand means "held" is null.`;
+
+/**
+ * Focused holding prompt augmented with the detector's hand-region evidence for
+ * this exact frame. The VLM is only allowed to name objects the detector
+ * actually observed near the person's hands — the detector is the grounding
+ * source and the VLM must not move desk/background objects into the hand.
+ */
+export function buildFocusedHoldingPrompt(
+  evidence: { labels: Set<string> } | null
+): string {
+  if (!evidence || evidence.labels.size === 0) {
+    return `${VISION_HOLDING_PROMPT}
+
+Detector note (STRICT): the object detector found NO objects near the person's hands in this frame. Therefore "held" must be null and "certain" must be false, unless you can clearly see an object held in a visible hand.`;
+  }
+  const observed = [...evidence.labels].join(", ");
+  return `${VISION_HOLDING_PROMPT}
+
+Detector observations for the person's hand region in this exact frame: ${observed}.
+Additional STRICT rules:
+- "held" must be one of the detector-observed objects listed above, or null.
+- Never name an object that is not in the detector observations, even if it looks plausible.
+- If the detector-observed objects are not actually in the person's hand (they may sit on a desk or in the background), set "held" to null — never move them into the hand.`;
+}
+
+/**
+ * Focused prompt for "what am I wearing?" — same idea: ONE tiny JSON value, a
+ * direct answer, no downstream reasoning model.
+ */
+export const VISION_WEARING_PROMPT = `You are the vision system for JARVIS. Look at the person's shirt/top in the camera frame and respond with ONLY a single valid JSON object — no markdown, no code fences, no extra text.
+
+Output exactly this shape:
+{
+  "shirt_color": "the primary color of the shirt/top, or null",
+  "certain": true or false,
+  "reasoning": "one short sentence stating exactly what you observed"
+}
+
+Anti-hallucination rules (STRICT):
+- Base this ONLY on what is clearly visible in the frame.
+- If no person is visible, or the shirt color cannot be clearly determined (blurred, cut off, blocked, dark), set "shirt_color" to null and "certain" to false.
+- Never guess, infer, or imagine a color.`;
+
+export interface FocusedVisionResult {
+  value: string | null;
+  certain: boolean;
+  reasoning: string;
+}
+
+/**
+ * Parse the tiny focused JSON (holding / wearing) into a direct result.
+ * Returns null when the raw output is not a parseable object with the key.
+ */
+export function parseFocusedVisionAnalysis(
+  raw: string,
+  key: "held" | "shirt_color"
+): FocusedVisionResult | null {
+  if (!raw) return null;
+  const cleaned = raw.replace(/```(?:json)?/gi, "").replace(/```/g, "").trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (!(key in obj)) return null;
+  const value = typeof obj[key] === "string" && obj[key].trim() ? obj[key].trim() : null;
+  return {
+    value,
+    certain: obj.certain === true,
+    reasoning: typeof obj.reasoning === "string" ? obj.reasoning : "",
+  };
+}
 
 function clampConfidence(value: unknown): number {
   const raw = Number(value);

@@ -66,6 +66,7 @@ export function VoiceInterface() {
   const setContinuousMode = useVoiceStore((s) => s.setContinuousMode);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const processingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const pendingStreamRef = useRef("");
@@ -236,11 +237,19 @@ export function VoiceInterface() {
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (distance < 96) {
-      el.scrollTop = el.scrollHeight;
-    }
+    el.scrollTop = el.scrollHeight;
   }, [messages, interimTranscript, streamingContent, errorMessage]);
+
+  const autoResizeInput = useCallback(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, []);
+
+  useEffect(() => {
+    autoResizeInput();
+  }, [inputText, autoResizeInput]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -402,15 +411,16 @@ export function VoiceInterface() {
           </button>
 
           <div className="flex-1 relative">
-            <input
-              type="text"
+            <textarea
+              ref={inputRef}
+              rows={1}
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={
                 state === "listening" ? "Speak or type..." : "Ask JARVIS anything..."
               }
-              className="w-full px-4 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.05] text-sm text-white/70 placeholder:text-white/20 outline-none focus:border-cyan-500/40 focus:shadow-[0_0_16px_rgba(56,189,248,0.08)] transition-all"
+              className="w-full px-4 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.05] text-sm leading-relaxed text-white/70 placeholder:text-white/20 outline-none focus:border-cyan-500/40 focus:shadow-[0_0_16px_rgba(56,189,248,0.08)] transition-all resize-none overflow-hidden max-h-[160px]"
             />
             {state === "listening" && !isProcessing && !isSpeaking && (
               <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">

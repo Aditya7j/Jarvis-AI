@@ -1,4 +1,5 @@
 import { aiLogger } from "./logger";
+import { JARVIS_VOICE_PROFILE } from "@/lib/tts-profile";
 
 export type SttMode = "auto" | "whisper" | "deepgram" | "browser";
 export type TtsMode = "auto" | "piper" | "browser";
@@ -103,7 +104,7 @@ export function loadEnvConfig(): EnvConfig {
     qwen3Model: env("QWEN3_MODEL") ?? env("OLLAMA_MODEL") ?? "qwen3:latest",
     gemma3Model: env("GEMMA3_MODEL") ?? null,
     requestTimeoutMs: readTimeout("AI_REQUEST_TIMEOUT_MS", 60_000),
-    visionTimeoutMs: readTimeout("AI_VISION_TIMEOUT_MS", 15_000),
+    visionTimeoutMs: readTimeout("AI_VISION_TIMEOUT_MS", 30_000),
     healthTimeoutMs: readTimeout("AI_HEALTH_TIMEOUT_MS", 10_000),
     maxToolIterations: readInt("AI_MAX_TOOL_ITERATIONS", 4),
     sttMode: readEnum("STT_MODE", ["auto", "whisper", "deepgram", "browser"] as const, "auto"),
@@ -116,7 +117,7 @@ export function loadEnvConfig(): EnvConfig {
     piperEnabled: readBoolean("PIPER_ENABLED", true),
     piperCommand: env("PIPER_COMMAND") ?? "piper",
     piperServerUrl: env("PIPER_SERVER_URL") ?? null,
-    piperVoice: env("PIPER_VOICE") ?? "en_US-lessac-medium",
+    piperVoice: env("PIPER_VOICE") ?? JARVIS_VOICE_PROFILE.piperVoice,
   };
 
   if (geminiApiKey) {

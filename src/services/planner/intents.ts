@@ -21,6 +21,7 @@ import {
   normalizeCurrency,
   parseCurrencyRequest,
 } from "@/lib/toolkit/web";
+import { extractDateTokens } from "@/lib/time/date-calc";
 
 /**
  * Greetings and casual conversation. These are whole-message matches: a greeting
@@ -171,6 +172,42 @@ export function detectWebSearch(text: string): boolean {
   );
 }
 
+/**
+ * Factual-knowledge phrasing ("Who is the prime minister of India now?",
+ * "What is the capital of France?"). A wh-word directly followed by a
+ * knowledge verb signals a question that needs a real source — the reasoning
+ * model has no live knowledge and would hallucinate it. Routed to web_search.
+ * Identity/meta questions about JARVIS itself are excluded so they stay on the
+ * reasoning model.
+ */
+const KNOWLEDGE_PHRASING: RegExp[] = [
+  /\b(?:who|what|when|where|which|whom)\b\s+(?:is|are|was|were|did|does|do|has|have|became|happened|invented|founded|discovered|won|wrote|made|created|killed|died|born|elected|nominated|appointed)\b/i,
+  /\bwhich\s+[\w-]+\s+(?:is|are|was|were|has|have|won|had|did|does|do|became)\b/i,
+  /\bwho\s+won\b/i,
+];
+
+const KNOWLEDGE_EXCLUSIONS: RegExp[] = [
+  /\bwho\s+are\s+you\b/i,
+  /\bwho\s+am\s+i\b/i,
+  /\bwhere\s+are\s+you\b/i,
+  /\bwhat\s+are\s+you\b/i,
+  /\bwhat\s+can\s+you\s+do\b/i,
+  /\bwhat(?:'?s|\s+is)\s+(?:your|ur)\s+(?:name|age|problem|issue|favourite|favorite|name\s*\.?)\b/i,
+  /\bwhat(?:'?s|\s+is)\s+(?:the\s+|today(?:'?s)?\s+)?(?:time|date|weather|news|forecast)\b/i,
+  /\bwhat(?:'?s|\s+is)\s+(?:up|new|going\s+on|cooking|happening|next)\b/i,
+  /\bwhat(?:'?s|\s+is)\s+\d[\d,.\s]*\b/i,
+  /\bwhat\s+time\s+(?:does|do|is|are|was|were|will|should)\s+(?:my|our|your)\b/i,
+  /\bwhat\s+do\s+you\s+(?:think|mean|want|need)\b/i,
+  /\bwhat\s+about\s+(?:you|u)\b/i,
+  /\bwhat\s+happened\s+to\s+you\b/i,
+];
+
+export function detectKnowledge(text: string): boolean {
+  if (!text) return false;
+  if (KNOWLEDGE_EXCLUSIONS.some((pattern) => pattern.test(text))) return false;
+  return KNOWLEDGE_PHRASING.some((pattern) => pattern.test(text));
+}
+
 const SYSTEM_STATUS_PATTERNS: RegExp[] = [
   /\b(?:cpu|processor)\s+(?:usage|load|percent|percentage|utilization|speed|model|cores)\b/i,
   /\b(?:ram|memory)\s+(?:usage|used|available|free|left|remaining|percent)\b/i,
@@ -301,6 +338,7 @@ const TIME_PATTERNS: RegExp[] = [
 
 const DATE_PATTERNS: RegExp[] = [
   /\bwhat(?:'s|\s+is)\s+(?:the\s+|today'?s\s+)?date\b/i,
+  /\bwhat\s+date\s+is\s+(?:it\s+)?today\b/i,
   /\bwhat\s+date\s+is\s+it\b/i,
   /\btoday'?s\s+date\b/i,
   /\bcurrent\s+date\b/i,
@@ -404,6 +442,48 @@ function matchesAny(text: string, patterns: RegExp[]): boolean {
 export function detectOcr(text: string): boolean {
   if (!text) return false;
   return matchesAny(text, OCR_PATTERNS);
+}
+
+/**
+ * Date-calculation phrasing — a question about the WEEKDAY (or day count) of a
+ * SPECIFIC date ("What day is 15 Aug 2026?", "How many days until 15 Aug
+ * 2026?"). Only matches when a concrete date token is present, so it can never
+ * hijack current-date questions ("what day is it today?") — those have no date
+ * token and are handled by detectDate.
+ */
+const DATE_CALC_PHRASING: RegExp[] = [
+  /\bwhat\s+day\b/i,
+  /\bwhat\s+weekday\b/i,
+  /\bwhich\s+day\b/i,
+  /\bday\s+of\s+the\s+week\b/i,
+  /\b(?:days?|din)\s+(?:until|till|since|between)\b/i,
+  /\bhow\s+many\s+days\b/i,
+  /\b(?:kitne\s+din|kaun\s+sa\s+din|kis\s+din)\b/i,
+  /(?:कौन\s+सा\s+दिन|किस\s+दिन|कितने\s+दिन)/u,
+];
+
+export function detectDateCalc(text: string): boolean {
+  if (!text) return false;
+  if (extractDateTokens(text).length === 0) return false;
+  return DATE_CALC_PHRASING.some((pattern) => pattern.test(text));
+}
+
+/**
+ * Follow-up corrections ("No, check again.", "that's wrong", "verify"). A date
+ * correction must re-run the deterministic date tool — never an LLM guess. The
+ * pipeline only honors this when a prior user message contains a date question.
+ */
+const DATE_CORRECTION_PATTERNS: RegExp[] = [
+  /\bno\b[^.,!?]{0,40}\b(?:check|verify|recheck|right|sure|wrong)\b/i,
+  /\b(?:check\s+(?:it\s+)?again|recheck|re-check|double\s+check|verify|are\s+you\s+sure|that'?s\s+wrong|that'?s\s+not\s+right)\b/i,
+  /\bwrong\b/i,
+  /\b(?:galat\s+(?:hai|h)|phir\s+(?:se\s+)?check\s+karo|phir\s+se\s+dekho|sach\s+mein)\b/i,
+  /(?:फिर\s+(?:से\s+)?चेक\s+करो|गलत\s+है|फिर\s+से\s+देखो|पक्का\s+नहीं|सच\s+में)/u,
+];
+
+export function detectDateCorrection(text: string): boolean {
+  if (!text) return false;
+  return DATE_CORRECTION_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 export function detectTime(text: string): boolean {

@@ -21,8 +21,10 @@ export const VISION_CACHE_TTL_MS = 2500;
 
 export interface CachedVisionResult {
   summary: VisionAnalysisSummary;
-  analysis: VisionStructuredAnalysis;
+  analysis: VisionStructuredAnalysis | null;
   systemContext: string;
+  /** Direct, grounded final answer (no reasoning-model hop) when available. */
+  text?: string | null;
   source: "webcam" | "screen";
   capturedAt: number;
   analyzedAt: number;

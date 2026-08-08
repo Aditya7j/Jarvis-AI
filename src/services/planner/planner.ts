@@ -22,7 +22,9 @@ import {
   detectConversational,
   detectCurrency,
   detectDate,
+  detectDateCalc,
   detectGeolocation,
+  detectKnowledge,
   detectMaps,
   detectMemory,
   detectMemoryStore,
@@ -55,6 +57,7 @@ export const CLASS_LABELS: Record<PlanClass, string> = {
   vision: "Vision System",
   time: "System Clock",
   date: "System Clock",
+  "date-calc": "Date Calculator",
   weather: "Weather API",
   location: "Browser Geolocation API",
   calendar: "Calendar",
@@ -75,6 +78,8 @@ export function toolsForClass(cls: PlanClass, text: string): string[] {
     case "time":
     case "date":
       return ["get_current_time"];
+    case "date-calc":
+      return ["get_weekday_for_date"];
     case "weather":
       return ["get_weather"];
     case "calendar":
@@ -166,6 +171,14 @@ export function classifyWithReasons(prompt: string): {
   if (detectTime(text)) {
     return { cls: "time", reasons: ["explicitly asked for the current time"] };
   }
+  if (detectDateCalc(text)) {
+    return {
+      cls: "date-calc",
+      reasons: [
+        "asked for the weekday or day count of a specific date — deterministic date tool",
+      ],
+    };
+  }
   if (detectDate(text)) {
     return { cls: "date", reasons: ["explicitly asked for today's/current date"] };
   }
@@ -196,10 +209,12 @@ export function classifyWithReasons(prompt: string): {
   if (detectCalculator(text)) {
     return { cls: "math", reasons: ["asked an arithmetic question"] };
   }
-  if (detectMaps(text) || detectNews(text) || detectWebSearch(text)) {
+  if (detectMaps(text) || detectNews(text) || detectWebSearch(text) || detectKnowledge(text)) {
     return {
       cls: "search",
-      reasons: ["asked for a web, news or maps lookup"],
+      reasons: [
+        "asked for a web, news, factual or maps lookup — the reasoning model cannot be a factual source",
+      ],
     };
   }
   return {
@@ -217,6 +232,7 @@ function stepFor(cls: PlanClass, text: string): PlanStep {
     memory: "what JARVIS remembers",
     time: "the current time",
     date: "today's date",
+    "date-calc": "the date",
     weather: "the current weather",
     location: "your current location",
     calendar: "your calendar",
@@ -240,6 +256,8 @@ export function toolsConsideredForClass(cls: PlanClass): string[] {
     case "time":
     case "date":
       return ["get_current_time"];
+    case "date-calc":
+      return ["get_weekday_for_date"];
     case "weather":
       return ["get_weather"];
     case "calendar":
@@ -271,6 +289,8 @@ export function toolsConsideredForClass(cls: PlanClass): string[] {
 export const TOOL_REQUIRED_REASONS: Record<string, string> = {
   get_current_time:
     "the user explicitly asked for the current time or date — only the verified system clock can supply it",
+  get_weekday_for_date:
+    "the user asked for the weekday or day count of a specific date — only the deterministic date tool can supply it",
   get_weather:
     "the user explicitly asked for live weather — only the weather API can supply it",
   get_calendar:

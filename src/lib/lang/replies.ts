@@ -18,6 +18,7 @@ export type CannedReplyKey =
   | "weatherNoLocation"
   | "weatherFailed"
   | "toolUnavailable"
+  | "dateCorrection"
   | "visionCancelled"
   | "visionFailed"
   | "noCamera"
@@ -43,6 +44,8 @@ const ENGLISH: ReplyTable = {
     "I couldn't verify the weather — the weather source is unavailable right now.",
   toolUnavailable:
     "I couldn't verify that — the required source is unavailable right now. Try again in a moment.",
+  dateCorrection:
+    "I don't see a date to re-check — ask me the full date question again and I'll compute it deterministically.",
   visionCancelled: "I stopped that request before it finished.",
   visionFailed: "I couldn't verify the visual — the vision source failed.",
   noCamera:
@@ -70,6 +73,8 @@ const HINGLISH: ReplyTable = {
     "Main weather verify nahi kar paya — weather source abhi available nahi hai.",
   toolUnavailable:
     "Main ye verify nahi kar paya — required source abhi available nahi hai. Thodi der baad try karo.",
+  dateCorrection:
+    "Mujhe re-check karne ke liye koi date nahi dikhi — poora date question dobara poochho, main deterministic compute karunga.",
   visionCancelled: "Maine wo request finish hone se pehle rok di.",
   visionFailed: "Main visual verify nahi kar paya — vision source fail ho gaya.",
   noCamera:
@@ -97,6 +102,8 @@ const HINDI: ReplyTable = {
     "मैं मौसम सत्यापित नहीं कर पाया — मौसम स्रोत अभी उपलब्ध नहीं है।",
   toolUnavailable:
     "मैं यह सत्यापित नहीं कर पाया — आवश्यक स्रोत अभी उपलब्ध नहीं है। थोड़ी देर बाद प्रयास करें।",
+  dateCorrection:
+    "मुझे दोबारा जाँचने के लिए कोई तारीख नहीं दिखी — पूरा तारीख वाला सवाल दोबारा पूछिए, मैं निर्धारित तरीके से गणना करूँगा।",
   visionCancelled: "मैंने वह अनुरोध पूरा होने से पहले रोक दिया।",
   visionFailed: "मैं दृश्य सत्यापित नहीं कर पाया — विज़न स्रोत विफल हो गया।",
   noCamera:

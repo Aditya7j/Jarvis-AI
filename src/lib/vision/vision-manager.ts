@@ -7,12 +7,18 @@ import type { VisionDepth } from "@/lib/ai/vision-intent";
 import { getCurrentWaterfall } from "@/lib/metrics/waterfall";
 import {
   currentCameraSessionId,
+  getBufferedFrameCandidates,
   LIVE_VISION_STALE_MS,
+  selectBestBufferedFrame,
   visionReady,
 } from "./live-vision-engine";
 import { answerFromVisionCache } from "./vision-answer";
 import { visionCache, type CachedVisionResult } from "./vision-cache";
-import { getVisionStateStore } from "./vision-state";
+import type { HeldObjectEvidence, HeldCandidate } from "./hold-grounding";
+import {
+  getVisionStateStore,
+  type VisionStateSnapshot,
+} from "./vision-state";
 
 /**
  * Vision Manager — the single gateway for EVERY visual question.
@@ -76,6 +82,16 @@ export interface VisionRoutingMeta {
   yoloInvoked: boolean;
   cameraSessionId: string | null;
   frameId: number;
+  /** Grounding: where the answer's evidence came from. */
+  source: "scene-cache" | "latest-frame-vlm" | "none";
+  /** Grounding: observed-at unix ms of the analyzed frame that backs the answer. */
+  observedAt: number | null;
+  /** Grounding: age of that frame at request time (ms). */
+  frameAgeMs: number | null;
+  /** Grounding: 0..100 confidence in the answer, when known. */
+  confidence: number | null;
+  /** Grounding: short evidence string describing what the cache/frame showed. */
+  evidence: string | null;
 }
 
 export type VisionResolution =
@@ -91,6 +107,14 @@ export type VisionResolution =
       kind: "gemma";
       frame: VisionFrameInput;
       cacheAgeMs: number;
+      /** Focused escalation for a simple attribute gap (holding/wearing). */
+      focus?: "holding" | "wearing";
+      /** Honest cache-grounded text to degrade to when the VLM cannot answer. */
+      fallbackText?: string | null;
+      /** Hand-region crop (JPEG data URL) of the same frame — sent for holding. */
+      heldCrop?: string | null;
+      /** Detector evidence for the hand region of the same frame. */
+      evidence?: HeldObjectEvidence | null;
       meta: VisionRoutingMeta;
     }
   | {
@@ -135,6 +159,43 @@ function classifyRequestType(prompt: string, depth: VisionDepth): "simple" | "co
 /** Age of the newest analyzed frame in ms. Infinity when none is present. */
 function cacheAgeMs(): number {
   return getVisionStateStore().getAgeMs();
+}
+
+/** Short evidence string describing what the Scene Cache currently shows. */
+function buildSceneEvidence(state: VisionStateSnapshot): string | null {
+  const people = state.latestPeople.length;
+  const objects = Object.keys(state.latestObjects).length;
+  if (people === 0 && objects === 0) return null;
+  const held = state.heldObject ? `; held: ${state.heldObject.label}` : "";
+  return `${people} person(s), ${objects} object(s)${held}`;
+}
+
+/**
+ * Detector evidence for a hand region, built from a frame's own candidates so
+ * the focused VLM is told exactly which objects the detector observed near the
+ * person's hands — and, crucially, so the evidence always matches the exact
+ * frame the VLM inspects (the buffered frame may be older than the newest one).
+ */
+function heldEvidenceFrom(
+  candidates: HeldCandidate[] | null | undefined,
+  hasPerson: boolean,
+  handRegion: { x: number; y: number; width: number; height: number } | null
+): HeldObjectEvidence | null {
+  if (!candidates || candidates.length === 0) return null;
+  const labels = new Set(candidates.map((candidate) => candidate.label));
+  return { labels, region: handRegion ?? null, hasPerson };
+}
+
+/**
+ * Detector evidence for the hand region of the newest scene frame, read from
+ * the current vision state (written by the engine for the latest frame).
+ */
+function buildHeldEvidence(state: VisionStateSnapshot): HeldObjectEvidence | null {
+  return heldEvidenceFrom(
+    state.heldCandidates,
+    state.latestPeople.length > 0,
+    state.latestPeople[0]?.handRegion ?? null
+  );
 }
 
 /**
@@ -185,10 +246,106 @@ export async function resolveVisualQuestion(
   const age = cacheAgeMs();
   const sceneBelongsToSession = state.cameraSessionId === sessionId;
   const sceneUsable = sceneBelongsToSession && state.frameId > 0;
-  const cacheHit = age <= VISION_CACHE_FRESH_MS;
+  const cacheFresh = age <= VISION_CACHE_FRESH_MS;
   const newestClient =
     [...frames].sort((a, b) => (b.capturedAt ?? 0) - (a.capturedAt ?? 0))[0] ??
     null;
+
+  log.info("[SceneCacheRead]", {
+    requestType,
+    depth,
+    cacheAgeMs: age,
+    fresh: cacheFresh,
+    frameId: state.frameId,
+    sessionId,
+    sceneBelongsToSession,
+    observedAt: state.timestamp > 0 ? state.timestamp : null,
+    evidence: buildSceneEvidence(state),
+    latencyMs: performance.now() - startedAt,
+  });
+
+  // Newest frame available to the VLM fallback. The camera is continuous and the
+  // engine keeps a small rolling buffer of the most recent ANALYZED frames with
+  // per-frame blur/brightness scores. The VLM fallback uses the newest
+  // *sufficiently sharp* buffered frame (never a question-time capture — none
+  // exists — and never a blurry newest frame when a sharp recent one exists).
+  const sceneFrame = sceneUsable && cacheFresh ? state.latestFrame : null;
+  const bufferedBest = sceneBelongsToSession ? selectBestBufferedFrame() : null;
+  const frameCandidates = sceneBelongsToSession ? getBufferedFrameCandidates() : [];
+  log.info("[FrameCandidates]", {
+    requestType,
+    depth,
+    sessionId,
+    candidates: frameCandidates.map((candidate) => ({
+      frameId: candidate.frameId,
+      ageMs: candidate.ageMs,
+      sharpness: candidate.sharpness,
+      brightness: candidate.brightness,
+    })),
+  });
+  log.info("[FrameSelected]", {
+    requestType,
+    depth,
+    sessionId,
+    frameId: bufferedBest?.frameId ?? state.frameId,
+    ageMs: bufferedBest ? Date.now() - bufferedBest.capturedAt : age,
+    qualityScore: bufferedBest?.quality.score ?? null,
+    sharpness: bufferedBest?.quality.sharpness ?? null,
+    brightness: bufferedBest?.quality.brightness ?? null,
+  });
+  log.info("[SceneCache]", {
+    requestType,
+    depth,
+    sessionId,
+    frameId: state.frameId,
+    ageMs: age,
+    heldObject: state.heldObject?.label ?? null,
+  });
+
+  // VLM source resolution: a genuinely fresher client frame still wins (it was
+  // captured by the continuous loop after the buffered one); otherwise the
+  // quality-selected buffered frame wins over the raw latest scene frame. The
+  // selected frame carries its OWN hand-region evidence so grounding always
+  // matches the pixels the VLM actually inspects.
+  let gemmaFrame: VisionFrameInput | null = null;
+  let gemmaSourceId = state.frameId;
+  let heldCrop: string | null = null;
+  let heldEvidence: HeldObjectEvidence | null = null;
+  if (
+    newestClient &&
+    (!bufferedBest || (newestClient.capturedAt ?? 0) - bufferedBest.capturedAt > 50)
+  ) {
+    gemmaFrame = newestClient;
+    heldCrop = state.heldCrop ?? null;
+    heldEvidence = buildHeldEvidence(state);
+  } else if (bufferedBest) {
+    gemmaFrame = {
+      image: stripDataUrlPrefix(bufferedBest.image),
+      mimeType: "image/jpeg",
+      source: undefined,
+      width: bufferedBest.width,
+      height: bufferedBest.height,
+      capturedAt: bufferedBest.capturedAt,
+    };
+    gemmaSourceId = bufferedBest.frameId;
+    heldCrop = bufferedBest.heldCrop ?? null;
+    heldEvidence = heldEvidenceFrom(
+      bufferedBest.heldCandidates,
+      bufferedBest.hasPerson,
+      bufferedBest.handRegion
+    );
+  } else if (sceneFrame) {
+    gemmaFrame = {
+      image: stripDataUrlPrefix(sceneFrame.buffer),
+      mimeType: "image/jpeg",
+      source: undefined,
+      width: sceneFrame.width,
+      height: sceneFrame.height,
+      capturedAt: sceneFrame.capturedAt,
+    };
+    heldCrop = state.heldCrop ?? null;
+    heldEvidence = buildHeldEvidence(state);
+  }
 
   if (visionState === "off") {
     wf?.end("vision_cache_lookup");
@@ -209,22 +366,30 @@ export async function resolveVisualQuestion(
         yoloInvoked: false,
         cameraSessionId: sessionId,
         frameId: 0,
+        source: "none",
+        observedAt: null,
+        frameAgeMs: age,
+        confidence: null,
+        evidence: null,
       },
     };
   }
 
-  // Simple questions: Scene Cache only. Never Gemma for detections, never a
-  // blocking YOLO refresh — the background engine already keeps this fresh.
-  // The scene is the single source of truth and is only trusted when it belongs
-  // to the current camera session.
+  // Simple questions: Scene Cache only. Never a blocking YOLO refresh — the
+  // background engine already keeps this fresh. The scene is the single source
+  // of truth and is only trusted when it belongs to the current camera session
+  // AND is fresh enough to answer from (a stalled engine must not serve an
+  // answer about a stale scene).
   if (depth === "simple") {
-    if (!sceneUsable) {
+    if (!sceneUsable || !cacheFresh) {
       wf?.end("vision_cache_lookup");
-      log.info("[Vision] warming up (no frame for current session yet)", {
+      log.info("[SceneCacheAge] simple question rejected — no fresh scene", {
         requestType,
         depth,
         sessionId,
         sceneBelongsToSession,
+        fresh: cacheFresh,
+        cacheAgeMs: age,
         latencyMs: performance.now() - startedAt,
       });
       return {
@@ -239,6 +404,11 @@ export async function resolveVisualQuestion(
           yoloInvoked: false,
           cameraSessionId: sessionId,
           frameId: state.frameId,
+          source: "none",
+          observedAt: state.timestamp > 0 ? state.timestamp : null,
+          frameAgeMs: age,
+          confidence: null,
+          evidence: null,
         },
       };
     }
@@ -246,6 +416,47 @@ export async function resolveVisualQuestion(
     if (!answer.needsGemma) {
       wf?.end("vision_cache_lookup");
       log.info("[Vision] answered from Scene Cache", {
+        requestType,
+        depth,
+        cacheAgeMs: age,
+        frameId: state.frameId,
+        sessionId,
+        source: "scene-cache",
+        observedAt: state.timestamp,
+        confidence: answer.confidence,
+        evidence: buildSceneEvidence(state),
+        latencyMs: performance.now() - startedAt,
+        text: answer.text.slice(0, 80),
+      });
+      return {
+        kind: "cached",
+        text: answer.text,
+        confidence: answer.confidence,
+        cacheAgeMs: age,
+        summary: buildCacheSummary(),
+        meta: {
+          requestType,
+          cacheHit: cacheFresh,
+          cacheAgeMs: age,
+          gemmaInvoked: false,
+          yoloInvoked: false,
+          cameraSessionId: sessionId,
+          frameId: state.frameId,
+          source: "scene-cache",
+          observedAt: state.timestamp,
+          frameAgeMs: age,
+          confidence: answer.confidence,
+          evidence: buildSceneEvidence(state),
+        },
+      };
+    }
+    // Simple attribute gap (held object / shirt colour not established by
+    // YOLO): ONE bounded, focused VLM call on the newest frame. The VLM runs at
+    // most once per request and degrades to the honest cache text on timeout.
+    // Simple questions never block on the VLM for any other gap.
+    if (!answer.escalation || !gemmaFrame) {
+      wf?.end("vision_cache_lookup");
+      log.info("[Vision] answered from Scene Cache (simple non-attribute gap)", {
         requestType,
         depth,
         cacheAgeMs: age,
@@ -262,38 +473,62 @@ export async function resolveVisualQuestion(
         summary: buildCacheSummary(),
         meta: {
           requestType,
-          cacheHit: age <= VISION_CACHE_FRESH_MS,
+          cacheHit: cacheFresh,
           cacheAgeMs: age,
           gemmaInvoked: false,
           yoloInvoked: false,
           cameraSessionId: sessionId,
           frameId: state.frameId,
+          source: "scene-cache",
+          observedAt: state.timestamp,
+          frameAgeMs: age,
+          confidence: answer.confidence,
+          evidence: buildSceneEvidence(state),
         },
       };
     }
-    // Attribute gap (e.g. shirt colour not established by YOLO): fall through
-    // to Gemma with the newest frame — clothing/colour is a legitimate Gemma
-    // task, and Gemma never runs for plain detections.
+    log.info("[VisionVLMFallback]", {
+      requestType,
+      depth,
+      focus: answer.escalation,
+      cacheAgeMs: age,
+      frameId: gemmaSourceId,
+      sessionId,
+      source: bufferedBest ? "best-buffered-frame" : newestClient ? "client-frame" : "scene-cache-frame",
+      capturedAt: gemmaFrame.capturedAt,
+      fallbackText: answer.text.slice(0, 80),
+    });
+    wf?.end("vision_cache_lookup");
+    return {
+      kind: "gemma",
+      frame: gemmaFrame,
+      cacheAgeMs: age,
+      focus: answer.escalation,
+      fallbackText: answer.text,
+      heldCrop: answer.escalation === "holding" ? heldCrop : undefined,
+      evidence: answer.escalation === "holding" ? heldEvidence : undefined,
+      meta: {
+        requestType,
+        cacheHit: cacheFresh,
+        cacheAgeMs: age,
+        gemmaInvoked: true,
+        yoloInvoked: false,
+        cameraSessionId: sessionId,
+        frameId: gemmaSourceId,
+        source: "latest-frame-vlm",
+        observedAt: gemmaFrame.capturedAt ?? state.timestamp ?? null,
+        frameAgeMs: gemmaFrame.capturedAt
+          ? Date.now() - gemmaFrame.capturedAt
+          : age,
+        confidence: null,
+        evidence: `frame #${gemmaSourceId}`,
+      },
+    };
   }
 
-  // Cache insufficient (stale, complex, OCR, or an attribute gap): Gemma Vision
-  // with the NEWEST frame only — the newest client frame, or the Scene Cache's
-  // latest frame as fallback. The scene frame is only usable when it belongs to
-  // the current session.
-  const sceneFrame = sceneUsable ? state.latestFrame : null;
-  const gemmaFrame: VisionFrameInput | null = newestClient
-    ? newestClient
-    : sceneFrame
-      ? {
-          image: stripDataUrlPrefix(sceneFrame.buffer),
-          mimeType: "image/jpeg",
-          source: undefined,
-          width: sceneFrame.width,
-          height: sceneFrame.height,
-          capturedAt: sceneFrame.capturedAt,
-        }
-      : null;
-
+  // Cache insufficient (complex or OCR): Gemma Vision with the NEWEST frame
+  // only — the newest client frame, or the Scene Cache's latest frame as
+  // fallback.
   if (!gemmaFrame) {
     wf?.end("vision_cache_lookup");
     log.info("[Vision] warming up (no frame available for current session)", {
@@ -315,17 +550,31 @@ export async function resolveVisualQuestion(
         yoloInvoked: false,
         cameraSessionId: sessionId,
         frameId: state.frameId,
+        source: "none",
+        observedAt: state.timestamp > 0 ? state.timestamp : null,
+        frameAgeMs: age,
+        confidence: null,
+        evidence: null,
       },
     };
   }
 
-  log.info("[Vision] sending newest frame to Gemma", {
+  log.info("[LatestFrame]", {
+    requestType,
+    depth,
+    source: bufferedBest ? "best-buffered-frame" : newestClient ? "client" : "scene-cache",
+    capturedAt: gemmaFrame.capturedAt,
+    frameAgeMs: gemmaFrame.capturedAt ? Date.now() - gemmaFrame.capturedAt : null,
+    frameId: gemmaSourceId,
+    sessionId,
+  });
+  log.info("[VisionVLMFallback]", {
     requestType,
     depth,
     cacheAgeMs: age,
-    frameId: state.frameId,
+    frameId: gemmaSourceId,
     sessionId,
-    source: newestClient ? "client" : "scene-cache",
+    source: bufferedBest ? "best-buffered-frame" : newestClient ? "client-frame" : "scene-cache-frame",
     capturedAt: gemmaFrame.capturedAt,
   });
   wf?.end("vision_cache_lookup");
@@ -335,12 +584,17 @@ export async function resolveVisualQuestion(
     cacheAgeMs: age,
     meta: {
       requestType,
-      cacheHit,
+      cacheHit: cacheFresh,
       cacheAgeMs: age,
       gemmaInvoked: true,
       yoloInvoked: false,
       cameraSessionId: sessionId,
-      frameId: state.frameId,
+      frameId: gemmaSourceId,
+      source: "latest-frame-vlm",
+      observedAt: gemmaFrame.capturedAt ?? state.timestamp ?? null,
+      frameAgeMs: gemmaFrame.capturedAt ? Date.now() - gemmaFrame.capturedAt : age,
+      confidence: null,
+      evidence: `frame #${gemmaSourceId}`,
     },
   };
 }
@@ -360,6 +614,8 @@ export const VISION_CACHE_FRAME_SKEW_MS = 250;
 export interface CachedVisionPlan {
   systemContext: string;
   summary: VisionAnalysisSummary;
+  /** Direct, grounded final answer (no reasoning-model hop) when available. */
+  text?: string | null;
 }
 
 let activeVisionController: AbortController | null = null;
@@ -432,7 +688,11 @@ export function cachedVisionPlan(
     ageMs: Date.now() - cached.analyzedAt,
     summary: cached.summary,
   });
-  return { systemContext: cached.systemContext, summary: cached.summary };
+  return {
+    systemContext: cached.systemContext,
+    summary: cached.summary,
+    text: cached.text ?? null,
+  };
 }
 
 export function cacheVisionResult(result: CachedVisionResult): void {

@@ -61,7 +61,7 @@ describe("Intent Planner", () => {
     });
 
     it("keeps general conversation on the LLM", () => {
-      expect(classifyPlanIntent("What is React?")).toBe("reasoning");
+      expect(classifyPlanIntent("What is React?")).toBe("search");
       expect(classifyPlanIntent("Tell me a joke")).toBe("reasoning");
       expect(
         classifyPlanIntent("Write a Python function that sorts a list")
@@ -79,7 +79,7 @@ describe("Intent Planner", () => {
         "reasoning"
       );
       expect(classifyPlanIntent("Where is the git config file?")).toBe(
-        "reasoning"
+        "search"
       );
       expect(
         classifyPlanIntent("What temperature should I bake bread at?")
@@ -247,16 +247,24 @@ describe("tool-invocation contract", () => {
       "What time does my flight leave?",
       "What temperature should I bake bread at?",
       "Tell me about rain forests",
-      "What is climate change?",
-      "What is humidity?",
       "How does wind form?",
-      "Where is the git config file?",
       "Explain battery recycling",
-      "What is React?",
       "Tell me a joke",
     ])("%s → reasoning with zero tools", (prompt) => {
       expect(classifyPlanIntent(prompt)).toBe("reasoning");
       expect(planRoute(prompt).step.tools).toEqual([]);
+    });
+  });
+
+  describe("definitional questions route to verified web grounding", () => {
+    it.each([
+      "What is climate change?",
+      "What is humidity?",
+      "Where is the git config file?",
+      "What is React?",
+    ])("%s → search via web_search", (prompt) => {
+      expect(classifyPlanIntent(prompt)).toBe("search");
+      expect(planRoute(prompt).step.tools).toEqual(["web_search"]);
     });
   });
 

@@ -44,10 +44,11 @@ import type { VisionAnalysisSummary } from "@/lib/ai/prompts";
 import { classifyVisionDepth } from "@/lib/ai/vision-intent";
 import { formatDateIn, formatTimeIn } from "@/lib/time/time-service";
 import { getSystemClock, logTimeService } from "@/lib/time/time-service";
+import { extractDateTokens } from "@/lib/time/date-calc";
 import type { VisionFrameInput } from "@/lib/vision/vision-manager";
 import type { AIMessageInput } from "@/lib/ai/types";
 import { parseConversionRequest } from "@/lib/toolkit/convert";
-import { normalizeCurrency, parseCurrencyRequest } from "@/lib/toolkit/web";
+import { enrichSearchQuery, normalizeCurrency, parseCurrencyRequest } from "@/lib/toolkit/web";
 import { getContextEngine } from "@/services/context/context-engine";
 import type { BatteryFact, WeatherFact } from "@/lib/ai/system-tools";
 import {
@@ -58,6 +59,8 @@ import {
 import {
   detectBattery,
   detectConversational,
+  detectDateCalc,
+  detectDateCorrection,
   detectGreeting,
   detectMaps,
   detectMemoryRecall,
@@ -75,6 +78,7 @@ import {
   type ToolTrace,
 } from "./hallucination";
 import { resolveVisionPlan } from "./vision";
+import { assertFactInvariant, HINDI_WEEKDAYS } from "./fact-authority";
 
 const log = aiLogger.child("pipeline");
 
@@ -89,6 +93,7 @@ export interface PipelineModel {
     prompt?: string;
     mimeType?: string;
     signal?: AbortSignal;
+    maxTokens?: number;
   }) => Promise<string>;
 }
 
@@ -137,6 +142,7 @@ function awarenessBlock(): string | null {
   const clock = getSystemClock();
   logTimeService("pipeline-awareness", clock);
   const blocks: string[] = [
+    `Today is ${clock.date} (verified). The current local time is ${clock.time} (${clock.timezone}).`,
     `Verified data from the TimeService tool — this is the ONLY source of truth for the current date, time, timezone and greeting:
 ${JSON.stringify({
   iso: clock.iso,
@@ -288,6 +294,23 @@ function looksLikeUnverifiedFactual(prompt: string): boolean {
   return UNVERIFIED_FACT_PATTERNS.some((pattern) => pattern.test(prompt));
 }
 
+/**
+ * Recover the date question a correction refers to ("No, check again." after
+ * "What day is 15 Aug 2026?"). Scans the user's PRIOR turns (never the current
+ * prompt) for a date-calc question. History only identifies WHICH date to
+ * re-check — it can never change the deterministic answer.
+ */
+function findPriorDateQuestion(messages: AIMessageInput[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role !== "user") continue;
+    if (detectDateCalc(message.content) && extractDateTokens(message.content).length > 0) {
+      return message.content;
+    }
+  }
+  return null;
+}
+
 const MEMORY_STORE_PREFIXES = [
   /^\s*(?:remember|note\s+down|note\s+that|don'?t\s+forget|do\s+not\s+forget|store\s+in\s+memory)\s+(?:that|this|to|the)?\s*/i,
   /^(?:याद\s+रखना|याद\s+रखो|याद\s+रख|नोट\s+कर\s+लो|नोट\s+कर|मुझे\s+याद\s+रख|याद\s+रहे)\s*/u,
@@ -345,6 +368,7 @@ function directArgs(cls: PlanClass, text: string): Record<string, unknown> {
     const parsed = parseConversionRequest(text);
     if (parsed) return { value: parsed.value, from: parsed.from, to: parsed.to };
   }
+  if (cls === "date-calc") return { text };
   return {};
 }
 
@@ -400,7 +424,89 @@ function directAnswer(
     if (typeof d.date === "string") return `Today is ${d.date}.`;
     return null;
   }
+  if (cls === "date-calc") {
+    const d = data as {
+      kind?: string;
+      display?: string;
+      weekday?: string;
+      localMs?: number;
+      days?: number;
+      startDisplay?: string;
+      endDisplay?: string;
+    };
+    if (d.kind === "weekday" && typeof d.weekday === "string" && typeof d.display === "string") {
+      if (language === "hindi") {
+        const localized = typeof d.localMs === "number" ? formatDateIn(language, d.localMs) : null;
+        const day = HINDI_WEEKDAYS[d.weekday] ?? d.weekday;
+        return `${localized ?? d.display} ${day} का दिन है।`;
+      }
+      if (language === "hinglish") {
+        const localized = typeof d.localMs === "number" ? formatDateIn(language, d.localMs) : null;
+        return `${localized ?? d.display} ${d.weekday} ko pada hai.`;
+      }
+      return `${d.display} is a ${d.weekday}.`;
+    }
+    if (
+      (d.kind === "days-until" || d.kind === "days-since") &&
+      typeof d.days === "number" &&
+      typeof d.display === "string"
+    ) {
+      const days = d.days;
+      if (language === "hindi") {
+        return d.kind === "days-until"
+          ? `${d.display} तक ${days} दिन बाकी हैं।`
+          : `${d.display} को ${days} दिन हुए हैं।`;
+      }
+      if (language === "hinglish") {
+        return d.kind === "days-until"
+          ? `${d.display} tak ${days} din baaki hain.`
+          : `${d.display} ko ${days} din hue hain.`;
+      }
+      return d.kind === "days-until"
+        ? `There are ${days} days until ${d.display}.`
+        : `It has been ${days} days since ${d.display}.`;
+    }
+    if (
+      d.kind === "days-between" &&
+      typeof d.days === "number" &&
+      typeof d.startDisplay === "string" &&
+      typeof d.endDisplay === "string"
+    ) {
+      return `There are ${d.days} days between ${d.startDisplay} and ${d.endDisplay}.`;
+    }
+    return null;
+  }
   return null;
+}
+
+/**
+ * Phase 8 safety invariant: the weekday the user sees MUST be the weekday the
+ * deterministic date tool computed. Any direct answer that does not contain
+ * the verified weekday (in the emitted language — English or Hindi) is a
+ * DATE_INVARIANT_VIOLATION — it must never reach the user, and it is logged
+ * with the expected vs actual values. Delegates to the general Fact Authority
+ * layer, which also guards math/conversion/time/date/weather/system answers.
+ */
+export function assertDateInvariant(
+  cls: PlanClass,
+  data: unknown,
+  text: string | null,
+  language: SpokenLanguage
+): { expected: string; actual: string } | null {
+  return assertFactInvariant(
+    cls,
+    [
+      {
+        tool: "get_weekday_for_date",
+        label: "Date",
+        subject: "the date",
+        fact: data,
+        executedAt: Date.now(),
+      },
+    ],
+    text,
+    language
+  );
 }
 
 function liveFactSummary(data: unknown): Record<string, unknown> | null {
@@ -969,6 +1075,49 @@ async function* streamThrough(
   }
 }
 
+/**
+ * Buffered variant used ONLY where the answer must be verified against the
+ * verified facts before it reaches the user (the naturalize path). Collects
+ * the model's full output (chain-of-thought stripped), returning it as one
+ * string so the Fact Authority can check it, then either emit it as-is or drop
+ * it in favour of a deterministic fallback.
+ */
+async function bufferStreamText(
+  model: PipelineModel,
+  messages: AIMessageInput[],
+  filter: CoTFilter,
+  signal?: AbortSignal,
+  modelName?: string
+): Promise<string> {
+  const wf = getCurrentWaterfall();
+  const llmStartedAt = Date.now();
+  wf?.count("llmCalls");
+  wf?.mark("llm_first_token");
+  let out = "";
+  for await (const token of model.streamText({ messages, signal, model: modelName })) {
+    if (wf) {
+      wf.setFirstToken();
+      wf.end("llm_first_token");
+      wf.mark("llm_complete");
+    }
+    const clean = filter.push(token);
+    if (clean) {
+      wf?.addResponse(clean.length);
+      out += clean;
+    }
+  }
+  const tail = filter.flush();
+  if (tail) {
+    wf?.addResponse(tail.length);
+    out += tail;
+  }
+  if (wf) {
+    wf.end("llm_complete");
+    wf.addLlm(Date.now() - llmStartedAt);
+  }
+  return out;
+}
+
 interface FinishArgs {
   requestId: string;
   prompt: string;
@@ -1155,6 +1304,135 @@ export async function* runPipeline(
     return;
   }
 
+  // ---------- Phase 6: a follow-up correction never triggers an LLM guess ----------
+  // "No, check again." after a date answer re-runs the deterministic date tool
+  // for the previously asked date. History only recovers WHICH date to re-check;
+  // it can never change the answer (identical deterministic result).
+  if (
+    route.kind !== "direct" &&
+    cls !== "date-calc" &&
+    detectDateCorrection(q)
+  ) {
+    const priorDateText = findPriorDateQuestion(messages);
+    if (!priorDateText) {
+      // No date in context to re-check — answer deterministically, never via
+      // the reasoning model (a correction must never become a weekday guess).
+      yield { kind: "status", phase: "tool" };
+      fallbackReason = "date_correction_no_date";
+      yield toolEvent(cls, "none", startedAt, false, fallbackReason);
+      yield { kind: "token", text: localizeReply(language, "dateCorrection") };
+      source = "reasoning";
+      yield* finish({
+        requestId,
+        prompt,
+        cls,
+        routeKind: route.kind,
+        source,
+        tools: toolTraces,
+        verifiedFactCount: 0,
+        llmInvoked,
+        startedAt,
+        options,
+        fallbackReason,
+      });
+      return;
+    }
+    if (priorDateText) {
+      const priorRoute = planRoute(priorDateText);
+      if (
+        priorRoute.step.cls === "date-calc" &&
+        priorRoute.step.tools[0] === "get_weekday_for_date"
+      ) {
+        yield { kind: "status", phase: "tool" };
+        const { results } = await executeSteps(
+          ["get_weekday_for_date"],
+          () => ({ text: priorDateText }),
+          { signal, requestId }
+        );
+        const result = results[0];
+        toolTraces[0] = { name: "get_weekday_for_date", ok: Boolean(result?.ok) };
+        if (result?.ok) {
+          const text = directAnswer("date-calc", result.data, language);
+          if (text) {
+            const violation = assertFactInvariant(
+              "date-calc",
+              [
+                {
+                  tool: "get_weekday_for_date",
+                  label,
+                  subject: "the date",
+                  fact: result.data,
+                  executedAt: Date.now(),
+                },
+              ],
+              text,
+              language
+            );
+            if (violation) {
+              log.error("[FACT_INVARIANT_VIOLATION]", {
+                requestId,
+                expected: violation.expected,
+                actual: violation.actual,
+              });
+              fallbackReason = "fact_invariant_violation";
+              yield toolEvent(
+                "date-calc",
+                "get_weekday_for_date",
+                startedAt,
+                false,
+                fallbackReason
+              );
+              yield { kind: "token", text: localizeReply(language, "toolUnavailable") };
+            } else {
+              yield toolEvent("date-calc", "get_weekday_for_date", startedAt, true);
+              yield { kind: "fact", tool: "get_weekday_for_date", subject: "the date" };
+              yield { kind: "token", text };
+            }
+            source = "tool";
+            yield* finish({
+              requestId,
+              prompt,
+              cls,
+              routeKind: route.kind,
+              source,
+              tools: toolTraces,
+              verifiedFactCount: 0,
+              llmInvoked,
+              startedAt,
+              options,
+              fallbackReason,
+            });
+            return;
+          }
+        }
+        fallbackReason = "date_correction_tool_failed";
+        yield toolEvent(
+          "date-calc",
+          "get_weekday_for_date",
+          startedAt,
+          false,
+          fallbackReason
+        );
+        yield { kind: "token", text: localizeReply(language, "toolUnavailable") };
+        source = "tool";
+        yield* finish({
+          requestId,
+          prompt,
+          cls,
+          routeKind: route.kind,
+          source,
+          tools: toolTraces,
+          verifiedFactCount: 0,
+          llmInvoked,
+          startedAt,
+          options,
+          fallbackReason,
+        });
+        return;
+      }
+    }
+  }
+
   // ---------- LLM confidence gate ----------
   // A request for a live fact (time/date/weather/…) that NO tool routed to
   // must never be answered by guesswork. If the detectors missed one of these,
@@ -1194,6 +1472,45 @@ export async function* runPipeline(
     if (result?.ok) {
       const text = directAnswer(cls, result.data, language);
       if (text) {
+        const violation = assertFactInvariant(
+          cls,
+          [
+            {
+              tool: tools[0],
+              label,
+              subject: label,
+              fact: result.data,
+              executedAt: Date.now(),
+            },
+          ],
+          text,
+          language
+        );
+        if (violation) {
+          log.error("[FACT_INVARIANT_VIOLATION]", {
+            requestId,
+            expected: violation.expected,
+            actual: violation.actual,
+          });
+          fallbackReason = "fact_invariant_violation";
+          yield toolEvent(cls, tools[0], startedAt, false, fallbackReason);
+          yield { kind: "token", text: localizeReply(language, "toolUnavailable") };
+          source = "tool";
+          yield* finish({
+            requestId,
+            prompt,
+            cls,
+            routeKind: route.kind,
+            source,
+            tools: toolTraces,
+            verifiedFactCount: 0,
+            llmInvoked,
+            startedAt,
+            options,
+            fallbackReason,
+          });
+          return;
+        }
         yield toolEvent(cls, tools[0], startedAt, true);
         yield { kind: "fact", tool: tools[0], subject: label };
         yield { kind: "token", text };
@@ -1313,8 +1630,21 @@ export async function* runPipeline(
       model,
       signal,
       language,
+      requestId,
     });
-    if (resolution.kind === "direct") {
+    if (resolution.kind === "direct" || resolution.kind === "direct-vlm") {
+      const answeredFrom =
+        resolution.kind === "direct-vlm"
+          ? resolution.grounding?.source === "scene-cache"
+            ? "Scene Cache"
+            : "Gemma"
+          : "Scene Cache";
+      log.info("[VisionFinal]", {
+        requestId,
+        source: answeredFrom,
+        grounding: resolution.grounding ?? null,
+        latencyMs: Date.now() - startedAt,
+      });
       if (resolution.summary) yield { kind: "vision", summary: resolution.summary };
       yield { kind: "status", phase: "cached" };
       yield { kind: "token", text: resolution.text };
@@ -1514,9 +1844,11 @@ export async function* runPipeline(
     case "weather": {
       toolsToRun = ["get_weather"];
       const loc = options.clientTools?.geolocation;
+      // Missing coordinates must surface as a typed failure, never default to
+      // (0,0) "Null Island" weather presented as verified.
       argFor = () => ({
-        latitude: loc?.latitude ?? 0,
-        longitude: loc?.longitude ?? 0,
+        latitude: loc?.latitude,
+        longitude: loc?.longitude,
       });
       break;
     }
@@ -1532,7 +1864,16 @@ export async function* runPipeline(
         argFor = () => ({ limit: 6 });
       } else {
         toolsToRun = ["web_search"];
-        argFor = () => ({ query: stripPrefix(q, SEARCH_PREFIXES) || q });
+        argFor = () => {
+          // Carry conversational context into the query: a follow-up like
+          // "who is the current prime minister?" after "...of india?" reuses
+          // the place from the earlier turn instead of re-searching in a void.
+          const priorUser = messages
+            .filter((m) => m.role === "user")
+            .map((m) => (typeof m.content === "string" ? m.content : ""))
+            .filter(Boolean);
+          return { query: enrichSearchQuery(stripPrefix(q, SEARCH_PREFIXES) || q, priorUser) };
+        };
       }
       break;
     }
@@ -1628,6 +1969,35 @@ export async function* runPipeline(
   // deterministically — the reasoning model is skipped entirely.
   const directNaturalize = formatDirectNaturalize(cls, q, facts, language);
   if (directNaturalize) {
+    // Fact Authority defense-in-depth: even deterministic formatting is
+    // re-checked before emission, so a formatting bug can never ship a value
+    // that contradicts the verified data.
+    const violation = assertFactInvariant(cls, facts, directNaturalize, language);
+    if (violation) {
+      log.error("[FACT_INVARIANT_VIOLATION]", {
+        requestId,
+        expected: violation.expected,
+        actual: violation.actual,
+      });
+      fallbackReason = "fact_invariant_violation";
+      yield toolEvent(cls, tools[0] ?? "none", startedAt, false, fallbackReason);
+      yield { kind: "token", text: localizeReply(language, "toolUnavailable") };
+      source = "tool";
+      yield* finish({
+        requestId,
+        prompt,
+        cls,
+        routeKind: route.kind,
+        source,
+        tools: toolTraces,
+        verifiedFactCount: facts.length,
+        llmInvoked,
+        startedAt,
+        options,
+        fallbackReason,
+      });
+      return;
+    }
     wf?.addResponse(directNaturalize.length);
     yield { kind: "status", phase: "answering" };
     for (const fact of facts) {
@@ -1675,7 +2045,26 @@ export async function* runPipeline(
       summary: liveFactSummary(f.fact),
     })),
   });
-  yield* streamThrough(model, finalMessages, filter, signal, options.model);
+  // Fact Authority guard: buffer the model's naturalization and verify it
+  // against the verified facts BEFORE it reaches the user. A contradiction
+  // (e.g. the model changing a temperature) is dropped in favour of the
+  // deterministic direct format — the user never sees an unverified override.
+  const emitted = await bufferStreamText(model, finalMessages, filter, signal, options.model);
+  const violation = assertFactInvariant(cls, facts, emitted, language);
+  if (violation) {
+    log.error("[FACT_INVARIANT_VIOLATION]", {
+      requestId,
+      expected: violation.expected,
+      actual: violation.actual,
+    });
+    fallbackReason = "fact_invariant_violation";
+    const direct = formatDirectNaturalize(cls, q, facts, language);
+    yield { kind: "token", text: direct ?? localizeReply(language, "toolUnavailable") };
+  } else if (emitted) {
+    yield { kind: "token", text: emitted };
+  } else {
+    yield { kind: "token", text: localizeReply(language, "toolUnavailable") };
+  }
   yield* finish({
     requestId,
     prompt,
@@ -1687,6 +2076,7 @@ export async function* runPipeline(
     llmInvoked,
     startedAt,
     options,
+    fallbackReason,
   });
 }
 

@@ -17,6 +17,11 @@ describe("classifyVisionIntent", () => {
     expect(classifyVisionIntent("what am I holding")).toBe("vision");
   });
 
+  it("treats slang 'u' as 'you' for see-phrases", () => {
+    expect(classifyVisionIntent("can u see me")).toBe("vision");
+    expect(classifyVisionIntent("can u see the cat")).toBe("vision");
+  });
+
   it("respects negation for instruction-like phrases", () => {
     expect(classifyVisionIntent("don't look at the screen")).toBe("text");
     expect(classifyVisionIntent("do not read the screen")).toBe("text");
@@ -33,6 +38,14 @@ describe("classifyVisionIntent", () => {
     expect(classifyVisionIntent("what is 2 + 2")).toBe("text");
     expect(classifyVisionIntent("tell me a joke")).toBe("text");
     expect(classifyVisionIntent("how's the weather")).toBe("text");
+  });
+
+  it("never invokes vision for the wake word / greetings", () => {
+    expect(classifyVisionIntent("hey jarvis")).toBe("text");
+    expect(classifyVisionIntent("jarvis")).toBe("text");
+    expect(classifyVisionIntent("hey jarvis, what can you do?")).toBe("text");
+    expect(classifyVisionIntent("good morning jarvis")).toBe("text");
+    expect(classifyVisionIntent("jarvis please set a timer")).toBe("text");
   });
 });
 
@@ -51,6 +64,11 @@ describe("classifyVisionDepth", () => {
     expect(classifyVisionDepth("what am I holding")).toBe("simple");
     expect(classifyVisionDepth("what color is my shirt")).toBe("simple");
     expect(classifyVisionDepth("how many people are there")).toBe("simple");
+  });
+
+  it("routes 'can u see me' (slang) to the simple cache path", () => {
+    expect(classifyVisionDepth("can u see me")).toBe("simple");
+    expect(classifyVisionDepth("can you see me")).toBe("simple");
   });
 
   it("defaults unknown vision prompts to complex", () => {

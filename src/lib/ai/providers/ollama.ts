@@ -1,5 +1,6 @@
 import { AIError, toAIError } from "../errors";
 import { fetchWithTimeout } from "../http";
+import { resizeImageForVlm, stripDataUrlPrefix } from "../image-resize";
 import { aiLogger } from "../logger";
 import type {
   GenerateTextOptions,
@@ -45,6 +46,9 @@ const FAST_MODEL_PREFERENCE = [
 ];
 
 const KEEP_ALIVE_MS = 5 * 60_000;
+
+/** Generic camera-frame analysis budget when the caller does not set one. */
+const VISION_DEFAULT_MAX_TOKENS = 512;
 
 /**
  * Reasoning/thinking trace stripping (requirement 7: never let internal CoT
@@ -517,7 +521,12 @@ export class OllamaProvider implements AIProvider {
 
   async generateVision(request: VisionRequest): Promise<string> {
     const model = await this.resolveModel(true, request.model);
-    const images = [request.imageBase64];
+    // Downscale first: a full-res webcam frame is 4-9x more vision tokens than
+    // a 512px version, and image prefill dominates latency on local hardware.
+    // The resize is bounded (~30-60ms with sharp) and fails soft back to the
+    // original frame.
+    const imageBase64 = await resizeImageForVlm(request.imageBase64);
+    const images = [stripDataUrlPrefix(imageBase64)];
     const messages: OllamaMessage[] = [
       {
         role: "user",
@@ -534,6 +543,11 @@ export class OllamaProvider implements AIProvider {
       think: false,
       options: {
         enable_thinking: false,
+        // Explicit num_predict: without it Ollama defaults to the model's full
+        // context (2048+ tokens) and keeps generating for minutes on slow CPUs
+        // even though the JSON answers are ~100-400 tokens. The caller passes a
+        // small budget (96 focused / 384 full); 512 is the generic default.
+        num_predict: request.maxTokens ?? VISION_DEFAULT_MAX_TOKENS,
       },
     };
     const startedAt = Date.now();

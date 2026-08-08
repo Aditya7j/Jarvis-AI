@@ -18,12 +18,15 @@ vi.mock("@/lib/vision/live-vision-engine", () => ({
   currentCameraSessionId: () => engineState.sessionId,
   visionReady: () => engineState.active,
   LIVE_VISION_STALE_MS: 1000,
+  selectBestBufferedFrame: () => null,
+  getBufferedFrameCandidates: () => [],
 }));
 
 import {
   resolveVisualQuestion,
   cachedVisionPlan,
   cacheVisionResult,
+  beginVisionAnalysis,
   VISION_CACHE_FRESH_MS,
 } from "@/lib/vision/vision-manager";
 import { getVisionStateStore } from "@/lib/vision/vision-state";
@@ -136,6 +139,25 @@ describe("camera open must never block chat (no inline YOLO / no Gemma for simpl
       expect(resolution.meta.yoloInvoked).toBe(false);
       expect(resolution.meta.cacheHit).toBe(true);
       expect(elapsed).toBeLessThan(300);
+    }
+  });
+
+  it("answers slang 'can u see me' from the Scene Cache (no VLM timeout)", async () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    seedScene("sess-1", [makePerson()], [makeObject("cell phone")]);
+
+    const resolution = await resolveVisualQuestion({
+      prompt: "can u see me?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+    });
+
+    expect(resolution.kind).toBe("cached");
+    if (resolution.kind === "cached") {
+      expect(resolution.text).toContain("Yes, I can see you");
+      expect(resolution.meta.gemmaInvoked).toBe(false);
     }
   });
 
@@ -434,5 +456,298 @@ describe("no hallucinated attributes (YOLO never invents what it didn't detect)"
 describe("hard timeout contract", () => {
   it("vision freshness windows stay interactive (simple answers well under 2s budget)", () => {
     expect(VISION_CACHE_FRESH_MS).toBeLessThan(2000);
+  });
+});
+
+describe("fast simple-path regression (no VLM / LLM when the cache suffices)", () => {
+  it("answers holding from the cache even when a fresh client frame is present", async () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    const person = makePerson();
+    seedScene("sess-1", [person], []);
+    getVisionStateStore().update({
+      objects: [],
+      people: [person],
+      colors: {},
+      heldObject: { label: "cell phone", confidence: 0.9 },
+      frameId: 8,
+      cameraSessionId: "sess-1",
+    });
+
+    const resolution = await resolveVisualQuestion({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: frames({ capturedAt: now() }),
+    });
+
+    expect(resolution.kind).toBe("cached");
+    if (resolution.kind === "cached") {
+      expect(resolution.text).toContain("cell phone");
+      expect(resolution.meta.gemmaInvoked).toBe(false);
+      expect(resolution.meta.source).toBe("scene-cache");
+    }
+  });
+});
+
+describe("scene freshness gate (stale cache never served)", () => {
+  it("rejects a scene older than the freshness window instead of answering", async () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    seedScene("sess-1", [makePerson()], [makeObject("bottle")]);
+    getVisionStateStore().getState().timestamp = now() - VISION_CACHE_FRESH_MS - 500;
+
+    const resolution = await resolveVisualQuestion({
+      prompt: "can you see me?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+    });
+
+    expect(resolution.kind).toBe("warming");
+    if (resolution.kind === "warming") {
+      expect(resolution.meta.gemmaInvoked).toBe(false);
+      expect(resolution.meta.frameAgeMs).toBeGreaterThan(VISION_CACHE_FRESH_MS);
+    }
+  });
+
+  it("never sends a stale Scene Cache frame to the VLM for complex questions", async () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    seedScene("sess-1", [makePerson()]);
+    getVisionStateStore().getState().timestamp = now() - VISION_CACHE_FRESH_MS - 500;
+
+    const resolution = await resolveVisualQuestion({
+      prompt: "describe the scene in detail",
+      depth: "complex",
+      visionState: "live",
+      frames: [],
+    });
+
+    expect(resolution.kind).toBe("warming");
+    expect(resolution.meta.gemmaInvoked).toBe(false);
+  });
+});
+
+describe("focused VLM fallback is bounded (at most once, no queueing)", () => {
+  it("holding gap escalates to exactly one gemma directive with a single frame", async () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    seedScene("sess-1", [makePerson()], []);
+
+    const t0 = Date.now();
+    const resolution = await resolveVisualQuestion({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: frames(),
+    });
+    const elapsed = Date.now() - t0;
+
+    expect(resolution.kind).toBe("gemma");
+    if (resolution.kind === "gemma") {
+      expect(resolution.focus).toBe("holding");
+      expect(resolution.frame).toBeTruthy();
+      expect(resolution.meta.gemmaInvoked).toBe(true);
+    }
+    // The manager returns the single directive immediately — never enqueues a
+    // second stage, never loops, never blocks on the camera.
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it("wearing gap escalates at most once, and non-attribute gaps stay on the cache", async () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    seedScene("sess-1", [makePerson({ shirtColor: undefined })], []);
+
+    const resolution = await resolveVisualQuestion({
+      prompt: "what am I wearing?",
+      depth: "simple",
+      visionState: "live",
+      frames: frames(),
+    });
+    expect(resolution.kind).toBe("gemma");
+    if (resolution.kind === "gemma") {
+      expect(resolution.focus).toBe("wearing");
+      expect(resolution.meta.gemmaInvoked).toBe(true);
+    }
+
+    const count = await resolveVisualQuestion({
+      prompt: "how many people are there?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+    });
+    expect(count.kind).toBe("cached");
+    if (count.kind === "cached") {
+      expect(count.meta.gemmaInvoked).toBe(false);
+    }
+  });
+});
+
+describe("camera / YOLO unaffected by the vision fast-path", () => {
+  it("a focused VLM escalation never stops the camera and never runs YOLO inline", async () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    seedScene("sess-1", [makePerson()], []);
+
+    const resolution = await resolveVisualQuestion({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: frames(),
+    });
+
+    expect(resolution.kind).toBe("gemma");
+    expect(engineState.active).toBe(true);
+    expect(resolution.meta.yoloInvoked).toBe(false);
+  });
+});
+
+describe("normal pipeline unchanged for satisfiable questions", () => {
+  it("keeps the grounded cache answer for object presence (no LLM, no VLM)", async () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    seedScene("sess-1", [makePerson()], [makeObject("cell phone")]);
+
+    const resolution = await resolveVisualQuestion({
+      prompt: "do you see my phone?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+    });
+
+    expect(resolution.kind).toBe("cached");
+    if (resolution.kind === "cached") {
+      expect(resolution.text).toContain("Yes, I can see a cell phone");
+      expect(resolution.meta.gemmaInvoked).toBe(false);
+      expect(resolution.meta.yoloInvoked).toBe(false);
+      expect(resolution.meta.source).toBe("scene-cache");
+    }
+  });
+
+  it("uses the newest of several client frames for complex analysis (never queues them)", async () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    seedScene("sess-1", [makePerson()]);
+    const newest = now();
+
+    const resolution = await resolveVisualQuestion({
+      prompt: "what is happening right now?",
+      depth: "complex",
+      visionState: "live",
+      frames: [
+        { ...frames()[0], capturedAt: newest - 5000 },
+        { ...frames()[0], capturedAt: newest },
+        { ...frames()[0], capturedAt: newest - 2500 },
+      ],
+    });
+
+    expect(resolution.kind).toBe("gemma");
+    if (resolution.kind === "gemma") {
+      expect(resolution.frame.capturedAt).toBe(newest);
+    }
+  });
+});
+
+describe("held vs detected (no hallucinated held objects)", () => {
+  it("a generic desk object is never reported as something I am holding", async () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    seedScene("sess-1", [makePerson()], [makeObject("laptop")]);
+
+    const resolution = await resolveVisualQuestion({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+    });
+
+    // No heldObject is established in the Scene Cache: the laptop is a scene
+    // detection (on the desk), NOT in the person's hand. The router must
+    // escalate to the focused VLM and never answer "you're holding a laptop".
+    expect(resolution.kind).toBe("gemma");
+    if (resolution.kind === "gemma") {
+      expect(resolution.focus).toBe("holding");
+      expect(resolution.fallbackText).toContain("I can't identify the object");
+      expect(resolution.fallbackText).not.toContain("laptop");
+      expect(resolution.meta.gemmaInvoked).toBe(true);
+    }
+  });
+
+  it("a held object already in the cache wins over generic scene detections", async () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    const person = makePerson();
+    seedScene("sess-1", [person], [makeObject("laptop")]);
+    getVisionStateStore().update({
+      people: [person],
+      objects: [makeObject("laptop")],
+      colors: {},
+      heldObject: { label: "cell phone", confidence: 0.85 },
+      frameId: 9,
+      cameraSessionId: "sess-1",
+    });
+
+    const resolution = await resolveVisualQuestion({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+    });
+
+    expect(resolution.kind).toBe("cached");
+    if (resolution.kind === "cached") {
+      expect(resolution.text).toContain("cell phone");
+      expect(resolution.meta.gemmaInvoked).toBe(false);
+    }
+  });
+});
+
+describe("no stale request may overwrite a newer answer (no queueing)", () => {
+  it("beginning a newer vision analysis cancels the previous in-flight one", () => {
+    const first = beginVisionAnalysis();
+    expect(first.signal.aborted).toBe(false);
+
+    const second = beginVisionAnalysis();
+    expect(first.signal.aborted).toBe(true);
+    expect(second.signal.aborted).toBe(false);
+
+    second.done();
+    first.done();
+
+    // After both finish, a fresh request starts clean.
+    const third = beginVisionAnalysis();
+    expect(third.signal.aborted).toBe(false);
+    third.done();
+  });
+
+  it("an already-finished older request cannot cancel a newer one", () => {
+    const first = beginVisionAnalysis();
+    first.done();
+
+    const second = beginVisionAnalysis();
+    expect(second.signal.aborted).toBe(false);
+    second.done();
+
+    first.signal.addEventListener("abort", () => undefined);
+    expect(second.signal.aborted).toBe(false);
+  });
+});
+
+describe("camera-off vision refusal is always direct", () => {
+  it("can you see me? with no camera is a no-camera refusal, never a VLM", async () => {
+    engineState.active = false;
+    const resolution = await resolveVisualQuestion({
+      prompt: "can you see me?",
+      depth: "simple",
+      visionState: "off",
+      frames: [],
+    });
+    expect(resolution.kind).toBe("no-camera");
+    if (resolution.kind === "no-camera") {
+      expect(resolution.meta.gemmaInvoked).toBe(false);
+      expect(resolution.meta.yoloInvoked).toBe(false);
+    }
   });
 });

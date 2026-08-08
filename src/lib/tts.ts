@@ -1,6 +1,7 @@
 "use client";
 
 import { detectSpeechLanguage } from "@/lib/lang/detect";
+import { JARVIS_VOICE_PROFILE } from "@/lib/tts-profile";
 
 const CHUNK_MAX_CHARS = 200;
 const SPEAK_AFTER_CANCEL_MS = 80;
@@ -76,6 +77,12 @@ function pickVoice(
   }
   const enUs = voices.filter((v) => v.lang.toLowerCase().startsWith("en-us"));
   const pool = enUs.length > 0 ? enUs : voices;
+  const male = pool.find((v) =>
+    JARVIS_VOICE_PROFILE.preferredBrowserVoiceNames.some((name) =>
+      v.name.toLowerCase().includes(name.toLowerCase())
+    )
+  );
+  if (male) return male;
   return (
     pool.find((v) => /google/i.test(v.name)) ??
     pool.find((v) => !v.localService) ??
@@ -209,6 +216,7 @@ class TTSManager {
     if (generation !== this.generation) return;
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
+    source.detune.value = JARVIS_VOICE_PROFILE.piperPitchCents;
     source.connect(ctx.destination);
     this.activeSource = source;
     await new Promise<void>((resolve) => {
@@ -255,8 +263,8 @@ class TTSManager {
     } else if (this.currentLang === "hi") {
       utterance.lang = "hi-IN";
     }
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
+    utterance.rate = JARVIS_VOICE_PROFILE.speakingRate;
+    utterance.pitch = JARVIS_VOICE_PROFILE.pitch;
     utterance.onend = () => this.speakNext(generation, onEnd);
     utterance.onerror = (event) => {
       console.warn(`[TTS] Utterance error: ${event.error}`);

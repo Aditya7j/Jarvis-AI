@@ -53,7 +53,7 @@ const COMPLEX_PATTERNS: RegExp[] = [
  * Anything vision-related that is not matched here is treated as complex.
  */
 const SIMPLE_PATTERNS: RegExp[] = [
-  /\b(do|can|could|did|are|will)\s+you\s+see\s+(me|us|anyone|anybody|someone)\b/i,
+  /\b(do|can|could|did|are|will)\s+(you|u)\s+see\s+(me|us|anyone|anybody|someone)\b/i,
   /\bwhat\s+am\s+i\s+holding\b/i,
   /\bwhat\s+am\s+i\s+wearing\b/i,
   /\bholding\b/i,
@@ -107,7 +107,7 @@ export function classifyVisionDepth(prompt: string): VisionDepth {
  * negation ("Don't you see the cat?" is still a vision question).
  */
 const STRONG_PATTERNS: RegExp[] = [
-  /\b(can|could|do|did|would|will)\s+you\s+see\b/i,
+  /\b(can|could|do|did|would|will)\s+(you|u)\s+see\b/i,
   /\b(?:don'?t|can'?t|couldn'?t|wouldn'?t)\s+you\s+see\b/i,
   /\bwhat\s+do\s+you\s+see\b/i,
   /\bwhat\s+can\s+you\s+see\b/i,

@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "eval:baseline": "vitest run --config vitest.eval.config.ts tests/eval/baseline.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
