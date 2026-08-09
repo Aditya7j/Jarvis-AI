@@ -59,6 +59,18 @@ const FUNCTION_CALL =
 /** Normalize spoken/written arithmetic into a machine-readable expression. */
 export function normalizeExpression(input: string): string {
   let text = input.toLowerCase().trim();
+  // Strip polite framing ("i ask you what is sqrt of 16", "can you tell me
+  // 2+2") so the arithmetic survives to the parser.
+  const COURTESY_FRAMES: RegExp[] = [
+    /^hey\s+jarvis\s*,?\s+/i,
+    /^i\s+(?:ask|want|would\s+like)\s+you(?:\s+to)?\s+/i,
+    /^(?:can|could|would)\s+you\s+(?:please\s+)?(?:tell\s+me\s+|answer\s+|solve\s+|calculate\s+|compute\s+|work\s+out\s+)/i,
+    /^please\s+(?:tell\s+me\s+|answer\s+|solve\s+|calculate\s+|compute\s+|work\s+out\s+)/i,
+    /^tell\s+me\s+/i,
+  ];
+  for (const frame of COURTESY_FRAMES) {
+    text = text.replace(frame, "");
+  }
   text = text.replace(/\bwhat(?:'s|s|\s+is|\s+are)\s+(?:the\s+)?(?:value\s+of\s+)?/i, "");
   text = text.replace(/[?]/g, "");
   text = text.replace(/,/g, "");

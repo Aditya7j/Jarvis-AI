@@ -195,6 +195,10 @@ const KNOWLEDGE_PHRASING: RegExp[] = [
 ];
 
 const KNOWLEDGE_EXCLUSIONS: RegExp[] = [
+  // Negation questions ("what is not just?", "what is not JS?") are
+  // definitional, not fact lookups — the web returns unrelated pages for them,
+  // so the reasoning model answers instead of surfacing junk.
+  /\bwhat(?:'?s|\s+is)\s+not\b/i,
   /\btell\s+me\s+the\s+story\b/i,
   /\bwhat\s+does\s+it\s+say\b/i,
   /\bwho\s+are\s+you\b/i,

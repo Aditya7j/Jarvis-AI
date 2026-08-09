@@ -16,6 +16,7 @@ import {
   parseOfficeQuestion,
   parseCapitalQuestion,
   officeLabelOf,
+  officeNounOf,
   anchorOf,
   properNounsOf,
   enrichSearchQuery,
@@ -217,6 +218,20 @@ describe("extractCapitalName", () => {
   });
 });
 
+describe("officeNounOf", () => {
+  it("extracts the core office noun of rank-qualified questions", () => {
+    expect(officeNounOf("Who is the first Sikh Prime Minister of India?")).toBe("minister");
+    expect(officeNounOf("Who was the last president of the United States?")).toBe("president");
+    expect(officeNounOf("Who was the first sikh prime minister of india?")).toBe("minister");
+  });
+
+  it("returns null for questions that are not rank-qualified officeholder questions", () => {
+    expect(officeNounOf("Who is the current prime minister of India?")).toBeNull();
+    expect(officeNounOf("What is the capital of France?")).toBeNull();
+    expect(officeNounOf("Who is Narendra Modi?")).toBeNull();
+  });
+});
+
 describe("webSearch Wikipedia fallback (mocked)", () => {
   it("answers an officeholder question from the infobox incumbent, not the raw top hit", async () => {
     // Raw MediaWiki order puts "Prime Minister's Office (India)" first — the
@@ -273,5 +288,90 @@ describe("webSearch Wikipedia fallback (mocked)", () => {
     SEARCH_RESPONSES.set("open:zzzzqxyt notreal", ["q", []]);
     const result = await webSearch("zzzzqxyt notreal");
     expect(result).toBeNull();
+  });
+
+  it("a rank-qualified office question with an irrelevant result returns null (never the current incumbent)", async () => {
+    // "Who is the FIRST sikh prime minister of india" must not be answered with
+    // whoever holds the office TODAY. The best Wikipedia hit is an unrelated
+    // demographics article whose lead never mentions the office — the relevance
+    // gate returns null so the caller defers to the reasoning model.
+    SEARCH_RESPONSES.set(
+      "search:who is the first sikh prime minister of india",
+      searchResult(["Sikhism in India"])
+    );
+    SEARCH_RESPONSES.set(
+      "wt:Sikhism in India",
+      "{{Infobox officeholder\n| office = Prime Minister of India\n| incumbent = [[Narendra Modi]]\n}}"
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Sikhism in India",
+      "Indian Sikhs number approximately 21 million in the country, making up about 1.7% of the population."
+    );
+    const result = await webSearch("who is the first sikh prime minister of india");
+    expect(result).toBeNull();
+  });
+
+  it("a rank-qualified office question KEEPS a result that actually mentions the office", async () => {
+    SEARCH_RESPONSES.set(
+      "search:who is the first sikh prime minister of india",
+      searchResult(["Manmohan Singh"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Manmohan Singh",
+      "Manmohan Singh was the 13th prime minister of India and the first Sikh to hold the office."
+    );
+    const result = await webSearch("who is the first sikh prime minister of india");
+    expect(result?.heading).toBe("Manmohan Singh");
+    expect(result?.abstract).toContain("prime minister");
+  });
+
+  it("a truncated DuckDuckGo body (JSON parse failure) falls through to Wikipedia instead of throwing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("api.duckduckgo.com")) {
+          return {
+            ok: true,
+            json: async () => {
+              throw new SyntaxError("Unexpected end of JSON input");
+            },
+          };
+        }
+        if (url.includes("list=search") && !url.includes("opensearch")) {
+          return { ok: true, json: async () => ({ query: { search: [] } }) };
+        }
+        if (url.includes("action=opensearch")) {
+          return { ok: true, json: async () => ["q", []] };
+        }
+        if (url.includes("prop=extracts")) {
+          return {
+            ok: true,
+            json: async () => ({ query: { pages: [{ extract: null }] } }),
+          };
+        }
+        throw new Error(`unmocked url: ${url}`);
+      })
+    );
+    const result = await webSearch("what is react");
+    expect(result).toBeNull();
+  });
+
+  it("ranks the article for the head noun above a longer, more generic keyword — 'closure' not 'JavaScript'", async () => {
+    // The subject of "what is a javascript closure?" is the LAST content
+    // keyword. Keyword-length scoring alone would rank the 10-char "javascript"
+    // above the 7-char "closure"; the head-noun bonus must pick the answer.
+    SEARCH_RESPONSES.set(
+      "search:what is a javascript closure",
+      searchResult(["JavaScript", "JavaScript syntax", "Closure (computer programming)", "JavaScript engine", "JavaScript library"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Closure (computer programming)",
+      "In programming languages, a closure is a technique for implementing lexically scoped name binding."
+    );
+    const result = await webSearch("what is a javascript closure");
+    expect(result?.heading).toBe("Closure (computer programming)");
+    expect(result?.abstract).toContain("closure");
+    expect(result?.abstract).not.toContain("JavaScript (JS) is a programming language");
   });
 });

@@ -254,6 +254,25 @@ export function properNounsOf(query: string): string[] {
 }
 
 /**
+ * Rank-qualified officeholder questions ("who is/was the FIRST Sikh prime
+ * minister of India?"). These can never be answered by the current-incumbent
+ * infobox branch — answering a "first/last/previous" question with whoever
+ * holds the office TODAY is the exact wrong-answer regression.
+ */
+const RANK_QUALIFIED_OFFICE =
+  /\bwho\s+(?:is|was)\s+(?:the\s+)?(?:first|last|previous|former|next|oldest|youngest|earliest|latest|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b/i;
+
+/** Core office noun of a rank-qualified question ("...first sikh prime minister of india" → "minister"). */
+export function officeNounOf(q: string): string | null {
+  const m = q.toLowerCase().trim().match(
+    /\bwho\s+(?:is|was)\s+(?:the\s+)?(?:first|last|previous|former|next|oldest|youngest|earliest|latest|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(.+?)\s+of\s+(.+?)\s*[?.!]?\s*$/
+  );
+  if (!m) return null;
+  const words = m[1].trim().split(/\s+/).filter((w) => w.length >= 3);
+  return words[words.length - 1] ?? null;
+}
+
+/**
  * Conversation-aware query enrichment: when the current question is an office
  * question that omits the place ("who is the current prime minister?") and a
  * PRIOR user turn asked about the same office WITH a place ("...of india"),
@@ -346,6 +365,16 @@ function scoreTitle(title: string, keywords: string[], anchors: string[], proper
   for (const noun of properNouns) {
     if (lower.includes(noun)) score += 10;
   }
+  // The last content keyword is the subject of a "what is X?" question
+  // ("closure" in "what is a javascript closure?"). A title that names it
+  // directly is the answer even when a longer, more generic keyword
+  // ("javascript") outranks it by raw length.
+  const headNoun = keywords.length > 0 ? keywords[keywords.length - 1] : null;
+  if (headNoun && lower.split(/[^a-z0-9]+/).includes(headNoun)) score += 15;
+  // A title that LEADS with a content keyword is the canonical article for it
+  // ("Closure (computer programming)"), while a brand-qualified derivative
+  // ("Google Closure Tools") is not the subject the question asks about.
+  if (keywords.some((kw) => kw.length >= 3 && lower.startsWith(kw))) score += 10;
   if (/^list of\b/.test(lower)) score -= 12;
   if (/\b(?:disambiguation|index of|timeline of)\b/.test(lower)) score -= 10;
   score -= lower.length / 100;
@@ -573,7 +602,9 @@ async function searchKnowledgeFallback(
 
   // Officeholder questions: read the article's infobox incumbent directly so
   // "who is the current prime minister of india" answers with the person.
-  if (parsed) {
+  // Rank-qualified questions ("who is the FIRST x of y") are excluded — their
+  // answer is never the current officeholder.
+  if (parsed && !RANK_QUALIFIED_OFFICE.test(query)) {
     const wikitext = await fetchWikipediaWikitext(best.title, timeoutMs, signal).catch(() => null);
     const incumbent = wikitext ? extractIncumbentName(wikitext) : null;
     if (incumbent) {
@@ -646,16 +677,31 @@ export async function webSearch(
   const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1&t=jarvis`;
   const res = await fetchWithTimeout(url, timeoutMs, signal);
   if (!res.ok) throw new ToolkitNetworkError(`Search service responded with ${res.status}.`);
-  const data = (await res.json()) as {
+  let data: {
     AbstractText?: string;
     AbstractURL?: string;
     Heading?: string;
     Answer?: string;
     AbstractSource?: string;
     RelatedTopics?: Array<{ Text?: string; FirstURL?: string; Topics?: Array<{ Text?: string; FirstURL?: string }> }>;
-  };
+  } | null = null;
+  try {
+    data = (await res.json()) as {
+      AbstractText?: string;
+      AbstractURL?: string;
+      Heading?: string;
+      Answer?: string;
+      AbstractSource?: string;
+      RelatedTopics?: Array<{ Text?: string; FirstURL?: string; Topics?: Array<{ Text?: string; FirstURL?: string }> }>;
+    };
+  } catch {
+    // DuckDuckGo intermittently returns a truncated/empty body that cannot be
+    // parsed as JSON. Treat it as "no instant answer" and fall through to the
+    // Wikipedia fallback instead of surfacing a SyntaxError to the caller.
+    data = null;
+  }
   const topics: SearchResult["topics"] = [];
-  for (const topic of data.RelatedTopics ?? []) {
+  for (const topic of data?.RelatedTopics ?? []) {
     if (topic.Text && topic.FirstURL) {
       topics.push({ text: topic.Text.slice(0, 200), url: topic.FirstURL });
       if (topics.length >= 5) break;
@@ -667,11 +713,11 @@ export async function webSearch(
   }
   let result: SearchResult = {
     query,
-    heading: data.Heading || null,
-    abstract: data.AbstractText || null,
-    answer: data.Answer || null,
-    source: data.AbstractSource || null,
-    url: data.AbstractURL || null,
+    heading: data?.Heading || null,
+    abstract: data?.AbstractText || null,
+    answer: data?.Answer || null,
+    source: data?.AbstractSource || null,
+    url: data?.AbstractURL || null,
     topics,
     engine: "DuckDuckGo",
   };
@@ -685,6 +731,18 @@ export async function webSearch(
     if (fallback) result = fallback;
   }
   if (!result.abstract && !result.answer && result.topics.length === 0) return null;
+  // Rank-qualified officeholder relevance gate: a "who is the first X of Y?"
+  // question is only answered when the result actually mentions the office
+  // ("...prime minister..."). An unrelated page (e.g. a demographics article
+  // about a community) is worse than no result — return null so the caller
+  // defers to the reasoning model instead of pasting irrelevant text.
+  const rankNoun = officeNounOf(query);
+  if (rankNoun) {
+    const content = `${result.abstract ?? ""} ${result.answer ?? ""} ${result.topics
+      .map((t) => t.text)
+      .join(" ")}`.toLowerCase();
+    if (!content.includes(rankNoun)) return null;
+  }
   searchCache.set(key, { value: result, at: Date.now() });
   return result;
 }

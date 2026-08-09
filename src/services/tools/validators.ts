@@ -278,7 +278,6 @@ export function validateWebSearch(data: unknown): ToolValidation {
   if (!isNonEmptyString(data.query)) return invalid("web_search: missing query");
   const topics = Array.isArray(data.topics) ? data.topics : [];
   const hasContent =
-    isNonEmptyString(data.heading) ||
     isNonEmptyString(data.abstract) ||
     isNonEmptyString(data.answer) ||
     topics.some((t) => isRecord(t) && isNonEmptyString(t.text));

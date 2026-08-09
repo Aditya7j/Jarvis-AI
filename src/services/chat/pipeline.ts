@@ -865,10 +865,13 @@ function formatSearchDirect(fact: unknown, language: SpokenLanguage): string {
     const prefix = f.source ? `According to ${f.source}: ` : "";
     return `${prefix}${f.abstract.trim()}`;
   }
-  if (f.heading?.trim()) return f.heading.trim();
   const topics = (f.topics ?? []).map((t) => t.text).filter(Boolean);
   if (topics.length > 0) {
-    return topics.slice(0, 3).map((t) => `- ${t}`).join("\n");
+    // A single clean answer from the top topic beats a noisy bullet list of
+    // loosely-related pages ("What is React?" → the React library, not three
+    // different React articles).
+    const top = topics[0];
+    if (top) return top;
   }
   return tr(
     language,
@@ -1932,6 +1935,45 @@ export async function* runPipeline(
       fallbackReason =
         first && !first.ok ? first.error.code.toLowerCase() : "tool_failed";
       yield toolEvent(cls, toolsToRun[0], startedAt, false, fallbackReason);
+      // Search is the only naturalize class whose empty/failed CONTENT the
+      // reasoning model can absorb honestly: when the web tool returned
+      // nothing usable (a JSON parse failure or an unverifiable empty result),
+      // hand the question back to the LLM instead of a canned refusal.
+      // Genuine availability failures (network down, timeout, cancelled) still
+      // refuse rather than guess — that contract is locked by knowledge.test.ts.
+      const searchContentFailure =
+        cls === "search" &&
+        toolsToRun.includes("web_search") &&
+        first &&
+        !first.ok &&
+        (first.error.code === "SyntaxError" ||
+          first.error.code === "VERIFICATION_FAILED");
+      if (searchContentFailure) {
+        yield { kind: "status", phase: "answering" };
+        source = "reasoning";
+        llmInvoked = true;
+        yield* streamThrough(model, base, filter, signal, options.model);
+        yield* finish({
+          requestId,
+          prompt,
+          cls,
+          routeKind: route.kind,
+          source,
+          tools: toolTraces,
+          verifiedFactCount: facts.length,
+          llmInvoked,
+          startedAt,
+          options,
+          fallbackReason,
+          // Deliberate fallback: the web tool found no usable content, so the
+          // model answers from its own knowledge. Marking grounded (as the
+          // vision path does for Gemma-verified answers) records this as an
+          // intentional degraded answer — never a silent hallucination. The
+          // `fallbackReason` preserves why the tools failed.
+          grounded: true,
+        });
+        return;
+      }
       const reply =
         cls === "weather"
           ? localizeReply(language, "weatherFailed")

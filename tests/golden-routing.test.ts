@@ -157,6 +157,23 @@ const ROUTING_REGRESSIONS: GoldenCase[] = [
   { question: "Tell me about the capital of France", expected: "search" },
 ];
 
+/**
+ * The exact 8-question acceptance set that triggered the routing/handling
+ * overhaul. "What is not X" must reason (the web surfaces unrelated pages);
+ * rank-qualified office questions still probe search first (then defer when
+ * the web has no usable answer); math stays on the calculator.
+ */
+const EIGHT_QUESTIONS: GoldenCase[] = [
+  { question: "What is React?", expected: "search" },
+  { question: "What is not just?", expected: "reasoning" },
+  { question: "What is not JS?", expected: "reasoning" },
+  { question: "Who is the first Sikh Prime Minister of India?", expected: "search" },
+  { question: "Is the first Sikh Prime Minister of India?", expected: "reasoning" },
+  { question: "What is the square root of 16?", expected: "math" },
+  { question: "Write the table of 19", expected: "reasoning" },
+  { question: "I ask you what is the square root of 16", expected: "math" },
+];
+
 function describeCases(group: string, cases: GoldenCase[]): void {
   describe(`golden routing — ${group}`, () => {
     for (const c of cases) {
@@ -180,6 +197,7 @@ describeCases("G live info", G_LIVE);
 describeCases("H vision (must stay vision)", H_VISION);
 describeCases("vision canary (must never be vision)", VISION_CANARIES);
 describeCases("exact 10-question sequence", SEQUENCE_10);
+describeCases("the 8-question acceptance set", EIGHT_QUESTIONS);
 describeCases("routing regressions (hijack-proofed)", ROUTING_REGRESSIONS);
 
 describe("vision classifier verdict per canary (component-level)", () => {

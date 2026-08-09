@@ -274,6 +274,11 @@ describe("validateWebSearch", () => {
     expect(reasonOf(v)).toBe("web_search: empty result");
   });
 
+  it("rejects a result that contains ONLY a title — a bare heading is not an answer", () => {
+    const v = validateWebSearch({ query: "x", heading: "React", abstract: "", answer: "", topics: [] });
+    expect(v.valid).toBe(false);
+  });
+
   it("rejects a null result", () => {
     const v = validateWebSearch(null);
     expect(v.valid).toBe(false);
