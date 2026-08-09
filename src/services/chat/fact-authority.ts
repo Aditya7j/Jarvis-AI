@@ -26,6 +26,36 @@ export const HINDI_WEEKDAYS: Record<string, string> = {
   Saturday: "शनिवार",
 };
 
+const MONTHS_BY_NAME: Record<string, number> = {
+  january: 1,
+  february: 2,
+  march: 3,
+  april: 4,
+  may: 5,
+  june: 6,
+  july: 7,
+  august: 8,
+  september: 9,
+  october: 10,
+  november: 11,
+  december: 12,
+};
+
+const HINDI_MONTH_NAMES: Record<number, string> = {
+  1: "जनवरी",
+  2: "फरवरी",
+  3: "मार्च",
+  4: "अप्रैल",
+  5: "मई",
+  6: "जून",
+  7: "जुलाई",
+  8: "अगस्त",
+  9: "सितंबर",
+  10: "अक्टूबर",
+  11: "नवंबर",
+  12: "दिसंबर",
+};
+
 export interface FactViolation {
   expected: string;
   actual: string;
@@ -117,13 +147,30 @@ export function assertFactInvariant(
   }
 
   if (cls === "time") {
-    const d = factOf(facts, "get_current_time") as { unixMs?: number } | null;
-    if (typeof d?.unixMs !== "number" || !Number.isFinite(d.unixMs)) return null;
-    const at = new Date(d.unixMs);
-    const hour24 = at.getHours();
-    const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
-    const minutes = String(at.getMinutes()).padStart(2, "0");
-    const refs = [`${hour24}:${minutes}`, `${hour12}:${minutes}`];
+    const d = factOf(facts, "get_current_time") as
+      | { unixMs?: number; time?: string }
+      | null;
+    const refs: string[] = [];
+    if (typeof d?.time === "string") {
+      // The canonical `time` is the exact string the user is shown (e.g.
+      // "3:45 PM GMT+5:30"). Deriving refs from it keeps the invariant
+      // aligned with what the display emitted — never a server-local
+      // recompute from unixMs that could drift from the formatter.
+      const m = d.time.match(/(\d{1,2}):(\d{2})\b/);
+      if (m) {
+        refs.push(`${m[1]}:${m[2]}`);
+        const hour12 = Number(m[1]) % 12 === 0 ? 12 : Number(m[1]) % 12;
+        refs.push(`${hour12}:${m[2]}`);
+      }
+    }
+    if (typeof d?.unixMs === "number" && Number.isFinite(d.unixMs)) {
+      const at = new Date(d.unixMs);
+      const hour24 = at.getHours();
+      const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+      const minutes = String(at.getMinutes()).padStart(2, "0");
+      refs.push(`${hour24}:${minutes}`, `${hour12}:${minutes}`);
+    }
+    if (refs.length === 0) return null;
     if (refs.some((ref) => actual.includes(ref))) return null;
     return { expected: refs[0], actual };
   }
@@ -131,10 +178,19 @@ export function assertFactInvariant(
   if (cls === "date") {
     const d = factOf(facts, "get_current_time") as { date?: string } | null;
     const dateText = d?.date;
-    const match = dateText?.match(/(\d{1,2}), (\d{4})/);
-    if (!match || !dateText) return null;
-    const [, day, year] = match;
-    if (actual.includes(year) && actual.includes(day)) return null;
+    if (!dateText) return null;
+    // Canonical form is "Weekday, MonthName D, YYYY" (e.g. "August 15, 2026").
+    // Capture the month word too so a wrong month can never pass.
+    const match = dateText.match(/([A-Za-z]+) (\d{1,2}), (\d{4})/);
+    if (!match) return null;
+    const [, monthWord, day, year] = match;
+    const month = MONTHS_BY_NAME[monthWord.toLowerCase()];
+    const monthRefs = month
+      ? [monthWord, HINDI_MONTH_NAMES[month], String(month)]
+      : [monthWord];
+    const lower = actual.toLowerCase();
+    const monthOk = monthRefs.some((ref) => lower.includes(ref.toLowerCase()));
+    if (actual.includes(year) && actual.includes(day) && monthOk) return null;
     return { expected: dateText, actual };
   }
 

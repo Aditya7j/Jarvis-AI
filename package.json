@@ -9,7 +9,8 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "eval:baseline": "vitest run --config vitest.eval.config.ts tests/eval/baseline.test.ts"
+    "eval:baseline": "vitest run --config vitest.eval.config.ts tests/eval/baseline.test.ts",
+    "eval:golden": "vitest run --config vitest.eval.config.ts tests/eval/golden.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",

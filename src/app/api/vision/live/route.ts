@@ -1,9 +1,11 @@
-import { invalidRequest } from "@/lib/api-helpers";
+import { invalidRequest, tooLarge } from "@/lib/api-helpers";
 import {
   liveVisionEngine,
   type LiveFrameInput,
 } from "@/lib/vision/live-vision-engine";export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const MAX_IMAGE_CHARS = 8_000_000;
 
 function stripDataUrlPrefix(image: string): string {
   if (image.startsWith("data:")) {
@@ -43,6 +45,9 @@ export async function POST(request: Request): Promise<Response> {
 
   if (typeof body.image !== "string" || !body.image) {
     return invalidRequest("No image provided.");
+  }
+  if (body.image.length > MAX_IMAGE_CHARS) {
+    return tooLarge("Vision frame is too large.");
   }
 
   const frame: LiveFrameInput = {

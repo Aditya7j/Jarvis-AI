@@ -1,9 +1,11 @@
 import { transcribeAudio } from "@/lib/ai/whisper";
 import { aiLogger } from "@/lib/ai/logger";
+import { tooLarge } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 
 const log = aiLogger.child("stt-api");
+const MAX_AUDIO_BYTES = 30 * 1024 * 1024;
 
 export async function POST(request: Request): Promise<Response> {
   const mimeType = request.headers.get("content-type") || "audio/webm";
@@ -14,6 +16,10 @@ export async function POST(request: Request): Promise<Response> {
       { error: { code: "INVALID_REQUEST", message: "No audio provided." } },
       { status: 400 }
     );
+  }
+
+  if (audio.length > MAX_AUDIO_BYTES) {
+    return tooLarge("Audio clip is too large (max 30 MB).");
   }
 
   const result = await transcribeAudio(audio, mimeType);

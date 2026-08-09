@@ -387,6 +387,15 @@ describe("verification contract", () => {
       ).toBe(false);
     });
 
+    it("an explicit `grounded` claim overrides the verified-fact default", () => {
+      expect(
+        isHallucination({ llmInvoked: true, toolBacked: true, verifiedFactCount: 0, grounded: true })
+      ).toBe(false);
+      expect(
+        isHallucination({ llmInvoked: true, toolBacked: true, verifiedFactCount: 1, grounded: false })
+      ).toBe(true);
+    });
+
     it("reports zero hallucinations across the whole verification battery", async () => {
       const model = recordingModel(["ok"]);
       const queries = [

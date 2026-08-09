@@ -3,6 +3,7 @@ import type {
   LiveVisionStats,
 } from "./live-vision-engine";
 import type { VisionStateSnapshot } from "./vision-state";
+import { withAuthHeaders } from "@/lib/api/auth";
 
 export interface LiveSubmitBody {
   image: string;
@@ -33,11 +34,11 @@ async function postLive(
   body: object
 ): Promise<LivePostResponse | null> {
   try {
-    const res = await fetch("/api/vision/live", {
+    const res = await fetch("/api/vision/live", withAuthHeaders({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    });
+    }));
     if (!res.ok) return null;
     return (await res.json()) as LivePostResponse;
   } catch (error) {
@@ -66,9 +67,9 @@ export async function getLiveState(
   source: "webcam" | "screen"
 ): Promise<LiveGetResponse | null> {
   try {
-    const res = await fetch(`/api/vision/live?source=${source}`, {
+    const res = await fetch(`/api/vision/live?source=${source}`, withAuthHeaders({
       headers: { Accept: "application/json" },
-    });
+    }));
     if (!res.ok) return null;
     return (await res.json()) as LiveGetResponse;
   } catch (error) {

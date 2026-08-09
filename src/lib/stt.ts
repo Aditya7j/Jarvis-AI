@@ -1,3 +1,5 @@
+import { withAuthHeaders } from "@/lib/api/auth";
+
 export function isSpeechRecognitionSupported(): boolean {
   if (typeof window === "undefined") return false;
   const w = window as unknown as {
@@ -11,11 +13,11 @@ export async function transcribeViaServer(
   blob: Blob,
   mimeType: string = blob.type || "audio/webm"
 ): Promise<string> {
-  const res = await fetch("/api/stt/transcribe", {
+  const res = await fetch("/api/stt/transcribe", withAuthHeaders({
     method: "POST",
     headers: { "Content-Type": mimeType },
     body: blob,
-  });
+  }));
   const body = (await res.json().catch(() => null)) as {
     transcript?: string;
     engine?: string;

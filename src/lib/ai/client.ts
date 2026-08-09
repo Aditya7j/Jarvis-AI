@@ -8,6 +8,7 @@ import { classifyVisionDepth, classifyVisionIntent } from "./vision-intent";
 import { classifyPlanIntent } from "@/services/planner";
 import { detectBattery } from "@/services/planner/intents";
 import { getSystemClock, logTimeService } from "./system-tools";
+import { withAuthHeaders } from "@/lib/api/auth";
 import type {
   BatteryResult,
   GeolocationResult,
@@ -99,7 +100,7 @@ export class AIClient {
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(path, init);
+    const res = await fetch(path, withAuthHeaders(init));
     const body = (await res.json().catch(() => null)) as
       | (T & { error?: ErrorPayload })
       | null;
@@ -246,7 +247,7 @@ export class AIClient {
       console.info("Vision skipped — prompt is text-only");
     }
 
-    const res = await fetch("/api/chat", {
+    const res = await fetch("/api/chat", withAuthHeaders({
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -254,7 +255,7 @@ export class AIClient {
       },
       body: JSON.stringify(body),
       signal,
-    });
+    }));
 
     if (!res.ok) {
       const body = (await res.json().catch(() => null)) as {

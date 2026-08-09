@@ -56,7 +56,7 @@ const SIMPLE_PATTERNS: RegExp[] = [
   /\b(do|can|could|did|are|will)\s+(you|u)\s+see\s+(me|us|anyone|anybody|someone)\b/i,
   /\bwhat\s+am\s+i\s+holding\b/i,
   /\bwhat\s+am\s+i\s+wearing\b/i,
-  /\bholding\b/i,
+  /\b(?:i'?m|i\s+am|you'?re|you\s+are|am\s+i|are\s+you|we'?re)\s+holding\b/i,
   /\bin\s+my\s+(hand|hands|lap)\b/i,
   /\bwearing\b/i,
   /\bshirt\b/i,
@@ -115,11 +115,13 @@ const STRONG_PATTERNS: RegExp[] = [
   /\bwhat\s+(am\s+i|are\s+you)\s+(wearing|holding)\b/i,
   /\bwhat\s+(is|was)\s+on\s+(my\s+)?(screen|display|monitor)\b/i,
   /\bon\s+(my\s+)?(screen|display|monitor)\b/i,
-  /\bwhat\s+is\s+(this|that)\b/i,
-  /\bwhat('s|s)\s+(this|that)\b/i,
+  // "what is this/that" is only a pointing question when it is terminal or
+  // points at a visible object — "what is that movie" is a reference question,
+  // not a camera request.
+  /\bwhat(?:'s|s|\s+is)\s+(?:this|that)\b(?:\s+(?:on|in|at|near)\s+(?:the\s+|my\s+)?(?:screen|desk|table|hand|room|wall|floor|shelf|monitor|phone|paper|bottle|cup|box))?[?.!,]*\s*$/i,
   /\bwhat\s+(is|was)\s+visible\b/i,
   /\btell\s+me\s+what\s+you\s+see\b/i,
-  /\bcan\s+you\s+(tell|describe)\b/i,
+  /\bcan\s+you\s+(?:tell\s+me\s+what\s+you\s+see|describe\s+(?:what\s+you\s+see|this\s+(?:image|picture|photo|view|frame)|the\s+(?:scene|room|camera|screen|view|desk|table)))\b/i,
   /क्या\s+तुम\s+मुझे\s+देख\s+(?:सकते\s+हो|सकती\s+हो|रहे\s+हो|रही\s+हो)/u,
   /तुम\s+मुझे\s+देख\s+रहे\s+हो/u,
   /मैं\s+क्या\s+पहन\s+(?:रखा\s+हूँ|रहा\s+हूँ|रही\s+हूँ)/u,
@@ -147,7 +149,7 @@ const CONDITIONAL_PATTERNS: RegExp[] = [
   // requests, but remain negation-gated ("don't read the screen" is text).
   /\bread\s+(?:the\s+)?(?:text|paper|screen|page|sign|label|letter|word|writing|note|document|card|poster|whiteboard|board)s?\b/i,
   /\bwhat\s+does\s+the\s+(?:text|screen|page|sign|label|paper|note|card|poster)\s+say\b/i,
-  /\bwhat\s+does\s+it\s+say\b/i,
+  /\bwhat\s+does\s+it\s+say\b(?!\s+(?:about|regarding|on)\b)/i,
   /\bwhat('s|s)\s+(?:it\s+|this\s+|that\s+)?say\b/i,
   /\btext\s+on\s+(?:this|that|the|my)\b/i,
   /\bwhat\s+is\s+written\b/i,
@@ -169,7 +171,7 @@ const CONDITIONAL_PATTERNS: RegExp[] = [
 
 const WEAK_PATTERNS: RegExp[] = [
   /\bwearing\b/i,
-  /\bholding\b/i,
+  /\b(?:i'?m|i\s+am|you'?re|you\s+are|am\s+i|are\s+you|we'?re)\s+holding\b/i,
   /\bshirt\b/i,
   /\bjacket\b/i,
   /\bhoodie\b/i,
@@ -186,7 +188,6 @@ const WEAK_PATTERNS: RegExp[] = [
   /\bvisible\b/i,
   /\bsee\s+me\b/i,
   /\bwhat\s+do\s+you\s+notice\b/i,
-  /\bnotice\b/i,
   /\bwhat\s+(is|are)\s+you\s+(looking|staring)\s+at\b/i,
   /\bwhat\s+is\s+(in\s+)?front\s+of\s+(me|you)\b/i,
   /\bhow\s+many\s+(people|person|persons|men|women|students|of\s+us|objects|things|items)\b/i,

@@ -7,6 +7,10 @@
 import { promises as fs } from "fs";
 import { isAbsolute, join, relative, resolve, sep } from "path";
 import { stringArg } from "../args";
+import {
+  isSensitivePath,
+  sensitivePathBlockMessage,
+} from "../agent-policy";
 import type { Tool } from "../types";
 
 /** Roots the filesystem tools are allowed to touch. */
@@ -20,7 +24,12 @@ function safeResolve(input: string): string {
   const target = resolve(input);
   const roots = allowedRoots();
   for (const root of roots) {
-    if (target === root || target.startsWith(root + sep)) return target;
+    if (target === root || target.startsWith(root + sep)) {
+      if (isSensitivePath(target)) {
+        throw new Error(sensitivePathBlockMessage(input));
+      }
+      return target;
+    }
   }
   const displayRoots = roots.map((r) => relative(process.cwd(), r) || ".");
   throw new Error(
@@ -52,10 +61,13 @@ export const listFiles: Tool = {
     const dir = safeResolve(join(process.cwd(), raw));
     const maxEntries = Math.max(1, Math.min(500, Number(args.limit) || 50));
     const entries = await fs.readdir(dir, { withFileTypes: true });
-    const items = entries.slice(0, maxEntries).map((entry) => {
-      const full = join(dir, entry.name);
-      return { name: entry.name, type: entry.isDirectory() ? "directory" : "file" };
-    });
+    const items = entries
+      .slice(0, maxEntries)
+      .filter((entry) => !isSensitivePath(join(dir, entry.name)))
+      .map((entry) => ({
+        name: entry.name,
+        type: entry.isDirectory() ? "directory" : "file",
+      }));
     return { path: raw, count: items.length, items, absolutePath: dir };
   },
 };
@@ -93,6 +105,7 @@ export const searchFiles: Tool = {
         if (matches.length >= maxResults) return;
         if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
         const full = join(dir, entry.name);
+        if (isSensitivePath(full)) continue;
         if (entry.name.toLowerCase().includes(needle.toLowerCase())) {
           matches.push(toEntry(full, roots[0]));
           continue;

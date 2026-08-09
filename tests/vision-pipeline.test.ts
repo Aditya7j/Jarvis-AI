@@ -453,6 +453,56 @@ describe("no hallucinated attributes (YOLO never invents what it didn't detect)"
   });
 });
 
+describe("count questions never conflate people with objects (regression)", () => {
+  it("'how many people' with zero people never answers with an object count", () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    seedScene("sess-1", [], [makeObject("bottle", { trackingId: 2 }), makeObject("cell phone", { trackingId: 3 })]);
+
+    const answer = answerFromVisionCache("how many people are here?");
+    expect(answer.needsGemma).toBe(false);
+    expect(answer.text).toContain("don't see any people");
+    expect(answer.text).not.toMatch(/\d/);
+  });
+
+  it("'how many people' counts people, not the objects beside them", () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    seedScene("sess-1", [makePerson({ trackingId: 1 })], [makeObject("bottle", { trackingId: 2 })]);
+
+    const answer = answerFromVisionCache("how many people are here?");
+    expect(answer.text).toContain("1 person");
+    expect(answer.text).not.toContain("bottle");
+  });
+
+  it("'how many objects' counts only non-person objects", () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    seedScene("sess-1", [makePerson({ trackingId: 1 })], [
+      makeObject("bottle", { trackingId: 2 }),
+      makeObject("cup", { trackingId: 3 }),
+    ]);
+
+    const answer = answerFromVisionCache("how many objects are on my desk?");
+    expect(answer.text).toContain("2 objects");
+  });
+
+  it("generic 'what do you see' never double-lists a person as an object", () => {
+    engineState.active = true;
+    engineState.sessionId = "sess-1";
+    // Mirrors the live engine, which pushes persons into sceneObjects too
+    // (live-vision-engine.ts: sceneObjects.push(person)).
+    seedScene("sess-1", [makePerson({ trackingId: 1 })], [
+      makeObject("person", { trackingId: 9, label: "person" }),
+    ]);
+
+    const answer = answerFromVisionCache("what do you see?");
+    expect(answer.text).toContain("1 person");
+    expect(answer.text.match(/person/g)).toHaveLength(1);
+    expect(answer.text).not.toContain("a person");
+  });
+});
+
 describe("hard timeout contract", () => {
   it("vision freshness windows stay interactive (simple answers well under 2s budget)", () => {
     expect(VISION_CACHE_FRESH_MS).toBeLessThan(2000);

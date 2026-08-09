@@ -86,6 +86,9 @@ const personCount = (state: VisionStateSnapshot): number => state.latestPeople.l
 function objectList(state: VisionStateSnapshot): { name: string; count: number; confidence: number }[] {
   const counts = new Map<string, { count: number; confidence: number }>();
   for (const object of Object.values(state.latestObjects)) {
+    // Persons are tracked separately in `latestPeople` and already listed via
+    // `formatObjectList`'s person prefix — never double-list them as objects.
+    if (object.label === "person") continue;
     const entry = counts.get(object.label) ?? { count: 0, confidence: 0 };
     entry.count += 1;
     entry.confidence = Math.max(entry.confidence, object.confidence);
@@ -183,11 +186,19 @@ export function answerFromVisionCache(prompt: string): SimpleVisionAnswer {
 
   // --- Count questions ---
   if (/\bhow\s+many\s+(people|person|persons|men|women|students|of\s+us|objects|things|items)\b/.test(p)) {
-    const count = people > 0 ? people : visible.reduce((sum, item) => sum + item.count, 0);
-    if (count === 0) {
-      return { text: "I don't see any people right now.", confidence: 65, needsGemma: false, fromCache: true };
-    }
+    // A "how many people" question must NEVER be answered with an object count.
+    // The noun decides the counting domain: persons come from latestPeople,
+    // objects from the (person-filtered) visible list.
     const noun = /\bpeople\b|\bpersons\b|\bmen\b|\bwomen\b|\bstudents\b|\bof\s+us\b/.test(p) ? "person" : "object";
+    const count = noun === "person" ? people : visible.reduce((sum, item) => sum + item.count, 0);
+    if (count === 0) {
+      return {
+        text: noun === "person" ? "I don't see any people right now." : "I don't see any objects right now.",
+        confidence: 65,
+        needsGemma: false,
+        fromCache: true,
+      };
+    }
     const plural = noun === "person" ? (count === 1 ? "person" : "people") : count === 1 ? "object" : "objects";
     return finalize(`I can see ${count} ${plural}.`, 85);
   }

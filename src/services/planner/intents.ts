@@ -95,11 +95,18 @@ const CALCULATOR_IMPLICIT: RegExp[] = [
   /\b(?:sqrt|square\s+root|cube\s+root|cbrt|sin|cos|tan|ln|log)\s*(?:of\s+)?\s*\d/i,
   /\b(?:divide|multiply)\s+\d+(?:\.\d+)?\s+by\s+\d+\b/i,
   /\b\d+\s+to\s+the\s+power\s+of\s+\d+\b/i,
+  /\b[a-z]\s*[+\-*/÷×]\s*\d+(?:\.\d+)?\s*=\s*\d+(?:\.\d+)?\b/i,
+  /\b\d+(?:\.\d+)?\s*[+\-*/÷×]\s*[a-z]\s*=\s*\d+(?:\.\d+)?\b/i,
 ];
 
 export function detectCalculator(text: string): boolean {
   if (!text) return false;
-  if (/^\s*\d[\d\s.,+\-*/÷×^%()]*\d?\s*[?]?\s*$/.test(text)) return true;
+  if (
+    /^\s*\d[\d\s.,+\-*/÷×^%()]*\d?\s*[?]?\s*$/.test(text) &&
+    /[+\-*/÷×^%]/.test(text)
+  ) {
+    return true;
+  }
   if (CALCULATOR_IMPLICIT.some((pattern) => pattern.test(text))) return true;
   if (ARITHMETIC_HINDI.some((pattern) => pattern.test(text))) return true;
   if (
@@ -159,7 +166,7 @@ export function detectNews(text: string): boolean {
 }
 
 const SEARCH_PATTERNS =
-  /\b(?:search\s+(?:the\s+web\s+)?(?:for\s+)?|look\s+it?\s+up|look\s+up|google\s+|web\s+search\s+(?:for\s+)?|find\s+out)\b/i;
+  /\b(?:search\s+(?:the\s+web\s+)?(?:for\s+)?|look\s+it?\s+up|look\s+up|google\s+(?:it|this|that|for)\b|web\s+search\s+(?:for\s+)?|find\s+out)\b/i;
 const SEARCH_HINDI = /(?:सर्च\s+करो|ढूँढो|खोजो|इंटरनेट\s+पर\s+देखो)/u;
 const SEARCH_HINGLISH = /\b(?:search\s+karo|google\s+karo|internet\s+par\s+dekho)\b/i;
 
@@ -184,9 +191,12 @@ const KNOWLEDGE_PHRASING: RegExp[] = [
   /\b(?:who|what|when|where|which|whom)\b\s+(?:is|are|was|were|did|does|do|has|have|became|happened|invented|founded|discovered|won|wrote|made|created|killed|died|born|elected|nominated|appointed)\b/i,
   /\bwhich\s+[\w-]+\s+(?:is|are|was|were|has|have|won|had|did|does|do|became)\b/i,
   /\bwho\s+won\b/i,
+  /\btell\s+me\s+(?:the\s+|about\s+the\s+)\w+\s+(?:of|in|on)\b/i,
 ];
 
 const KNOWLEDGE_EXCLUSIONS: RegExp[] = [
+  /\btell\s+me\s+the\s+story\b/i,
+  /\bwhat\s+does\s+it\s+say\b/i,
   /\bwho\s+are\s+you\b/i,
   /\bwho\s+am\s+i\b/i,
   /\bwhere\s+are\s+you\b/i,
@@ -310,7 +320,7 @@ const OCR_PATTERNS: RegExp[] = [
   /\bocr\b/i,
   /\bread\s+(?:the\s+)?(?:text|screen|page|sign|label|letter|word|writing|note|document|card|poster|whiteboard)\b/i,
   /\bwhat\s+does\s+the\s+(?:text|screen|page|sign|label|paper|note|card|poster)\s+say\b/i,
-  /\bwhat\s+does\s+it\s+say\b/i,
+  /\bwhat\s+does\s+it\s+say\b(?!\s+(?:about|regarding|on)\b)/i,
   /\bwhat'?s\s+(?:it\s+|this\s+|that\s+)?say(?:ing)?\b/i,
   /\btext\s+on\s+(?:this|that|the|my)\b/i,
   /\bwhat\s+is\s+written\b/i,
@@ -327,8 +337,9 @@ const TIME_PATTERNS: RegExp[] = [
   /\btime\s+now\b/i,
   /\btell\s+me\s+(?:the\s+)?(?:current\s+)?time\b/i,
   /\bgive\s+me\s+(?:the\s+)?(?:current\s+)?time\b/i,
-  /\btime\s+zone\b/i,
-  /\btimezone\b/i,
+  /\b(?:what|which)\s+(?:timezone|time\s+zone)\s+(?:am\s+i|is\s+it)\b/i,
+  /\bmy\s+(?:timezone|time\s+zone)\b/i,
+  /\bcurrent\s+(?:timezone|time\s+zone)\b/i,
   /(?:कितने\s+बजे|समय\s+क्या|टाइम\s+क्या|अभी\s+कितने\s+बजे|क्या\s+समय|क्या\s+टाइम)/u,
   /(?:समय|टाइम)\s+बताओ/u,
   /(?:समय\s+क्या\s+हुआ|टाइम\s+क्या\s+हुआ)/u,
@@ -349,11 +360,13 @@ const DATE_PATTERNS: RegExp[] = [
   /(?:आज\s+कौन\s+सी\s+तारीख|आज\s+की\s+तारीख|आज\s+तारीख\s+क्या|तारीख\s+क्या\s+है|कौन\s+सी\s+तारीख|कौन\s+सा\s+दिन)/u,
   /आज\s+क्या\s+(?:तारीख|दिन)\s+है/u,
   /\b(?:aaj\s+ki\s+tarikh|aaj\s+kya\s+tarikh|tarikh\s+kya\s+(?:hai|h)|kaun\s+si\s+tarikh|kaun\s+sa\s+din)\b/i,
+  /\bwhat(?:'s|\s+is)\s+(?:the\s+)?(?:tomorrow'?s|yesterday'?s|day\s+after\s+tomorrow'?s)\s+date\b/i,
+  /\bdate\s+(?:is\s+it\s+)?(?:tomorrow|yesterday|the\s+day\s+after\s+tomorrow)\b/i,
 ];
 
 const GEOLOCATION_PATTERNS: RegExp[] = [
   /\bwhere\s+am\s+i\b/i,
-  /\bwhere\s+are\s+(?:we|you)\b/i,
+  /\bwhere\s+are\s+we\b/i,
   /\bwhere\s+am\s+i\s+located\b/i,
   /\bwhere\s+is\s+my\s+location\b/i,
   /\bmy\s+location\b/i,
@@ -369,17 +382,15 @@ const GEOLOCATION_PATTERNS: RegExp[] = [
 
 const WEATHER_PATTERNS: RegExp[] = [
   /\bweather\b/i,
-  /\bforecast\b/i,
+  /\bweather\s+forecast\b/i,
+  /\bforecast\s+(?:for|in)\b/i,
   /\bwhat(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+)?(?:temperature|temp|weather|forecast)\b/i,
   /\bwhat(?:'s|\s+is)\s+(?:the\s+)?(?:high|low)\b.*\b(?:today|tomorrow|outside|right\s+now)\b/i,
   /\btemperatures?\s+(?:outside|today|right\s+now|out\s+there|there)\b/i,
   /\b(?:is\s+it|will\s+it|does\s+it|is\s+there)\s+(?:rain(?:ing)?|snow(?:ing)?|hot|cold|warm|cool|sunny|cloudy|overcast|windy|foggy|stormy|humid)\b/i,
   /\bhow\s+(?:hot|cold|warm|cool|rainy|sunny|cloudy|windy|foggy)\s+is\s+it(?:\s+(?:outside|today|right\s+now))?\b/i,
   /\bhow'?s\s+(?:the\s+)?(?:weather|temperature|forecast)\b/i,
-  /\braining\b/i,
-  /\bsunny\b/i,
-  /\bcloudy\b/i,
-  /\bovercast\b/i,
+  /\b(?:sunny|cloudy|overcast|rain(?:ing)?|hot|cold|windy|foggy|stormy)\s+(?:in|at|outside|today|tomorrow|right\s+now)\b/i,
   /(?<!\p{Script=Devanagari})मौसम(?!\p{Script=Devanagari})/u,
   /(?<!\p{Script=Devanagari})तापमान(?!\p{Script=Devanagari})/u,
   /(?<!\p{Script=Devanagari})बारिश(?!\p{Script=Devanagari})/u,
@@ -390,11 +401,17 @@ const WEATHER_PATTERNS: RegExp[] = [
   /\b(?:kaisa\s+mausam|weather\s+kaisa)\b/i,
 ];
 
+/**
+ * Explanatory phrasing that mentions weather vocabulary but asks HOW it works
+ * ("how does weather forecasting work?") — never a live-conditions query.
+ */
+const WEATHER_EXPLANATORY =
+  /\bhow\s+(?:does|do|to)\s+[^.,!?]{0,40}?\b(?:weather|forecast)\b[^.,!?]{0,20}?\b(?:work|form|happen|change|create|forecast)\b/i;
+
 const BATTERY_PATTERNS: RegExp[] = [
   /\bbattery\s+(?:level|life|percentage|charge|status|left|remaining|health)\b/i,
   /\bbattery\s+is\s+(?:low|full|draining|dying|dead|charged|at)\b/i,
   /\bbattery\s+at\b/i,
-  /\bpower\s+level\b/i,
   /\bhow\s+much\s+(?:battery|power|charge)\s+(?:do\s+(?:i|we)\s+have|is\s+left|is\s+remaining|left|do\s+i\s+have)\b/i,
   /\b(?:battery|charge)\s+left\b/i,
   /\bcharging\s+status\b/i,
@@ -414,6 +431,8 @@ const CALENDAR_PATTERNS: RegExp[] = [
   /\bwhat\s+(?:am\s+i\s+doing|do\s+i\s+have)\s+(?:today|tomorrow|this\s+week)\b/i,
   /\bwhat\s+(?:appointments?|meetings?|events?)\s+do\s+i\s+have(?:\s+(?:today|tomorrow|this\s+week|this\s+weekend|scheduled|planned|coming\s+up))?\b/i,
   /\b(?:show|list)\s+(?:me\s+)?my\s+(?:appointments?|meetings?|events?|calendar|schedule)\b/i,
+  /\bwhen\s+(?:is|are|was|were)\s+(?:my|our|the)?\s*(?:meeting|appointment|call|event|interview)\b/i,
+  /\bwhat\s+time\s+(?:is|are)\s+(?:my|our|the)\s+(?:meeting|appointment|call|event)\b/i,
   /(?:आज\s+मेरा\s+शेड्यूल|आज\s+का\s+शेड्यूल|कल\s+का\s+शेड्यूल|कल\s+क्या\s+करना\s+है|अगले\s+सोमवार|परसों|कल\s+सुबह|आज\s+शाम)/u,
   /(?<!\p{Script=Devanagari})शेड्यूल(?!\p{Script=Devanagari})/u,
   /(?<!\p{Script=Devanagari})कैलेंडर(?!\p{Script=Devanagari})/u,
@@ -508,6 +527,7 @@ export function detectGeolocation(text: string): boolean {
 
 export function detectWeather(text: string): boolean {
   if (!text) return false;
+  if (WEATHER_EXPLANATORY.test(text)) return false;
   return matchesAny(text, WEATHER_PATTERNS);
 }
 

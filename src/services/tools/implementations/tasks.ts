@@ -5,6 +5,7 @@
 
 import { taskEngine } from "@/services/tasks";
 import { getSystemClock, logTimeService } from "@/lib/time/time-service";
+import { isAgentToolAllowed } from "../agent-policy";
 import type { TaskRecurrence } from "@/services/tasks/types";
 import { numberArg, stringArg } from "../args";
 import type { Tool } from "../types";
@@ -60,7 +61,7 @@ export const createTask: Tool = {
     parameters: [
       { name: "title", type: "string", description: "Task title.", required: true },
       { name: "description", type: "string", description: "Optional detail." },
-      { name: "actionType", type: "string", description: "Optional tool name to run when the task executes." },
+      { name: "actionType", type: "string", description: "Optional tool name to run when the task executes. Only allow-listed read-only tools (web_search, get_weather, calculate, ...) may be used as task actions." },
       { name: "actionArgs", type: "object", description: "Arguments for the action tool." },
       { name: "inMinutes", type: "number", description: "Run this many minutes from now." },
       { name: "scheduledAtIso", type: "string", description: "ISO timestamp to run at." },
@@ -72,18 +73,24 @@ export const createTask: Tool = {
     const title = stringArg(args, "title");
     if (!title) throw new Error("The 'title' argument is required.");
     const actionArgs = args.actionArgs;
+    const actionType =
+      typeof args.actionType === "string" ? args.actionType.trim() : "";
+    if (actionType && !isAgentToolAllowed(actionType)) {
+      throw new Error(
+        `Tool "${actionType}" is not allowed as a task action — task actions are restricted to the agent allow-list.`
+      );
+    }
     const task = await taskEngine.createTask({
       title,
       description: stringArg(args, "description"),
       scheduledAt: parseScheduledAt(args),
       recurrence: parseRecurrence(args),
-      action:
-        typeof args.actionType === "string" && args.actionType.trim()
-          ? {
-              type: args.actionType.trim(),
-              args: actionArgs && typeof actionArgs === "object" ? (actionArgs as Record<string, unknown>) : {},
-            }
-          : null,
+      action: actionType
+        ? {
+            type: actionType,
+            args: actionArgs && typeof actionArgs === "object" ? (actionArgs as Record<string, unknown>) : {},
+          }
+        : null,
       maxAttempts: numberArg(args, "maxAttempts", 1, { min: 1, max: 5 }),
       source: "ai",
     });

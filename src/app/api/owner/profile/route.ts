@@ -1,8 +1,10 @@
-import { invalidRequest, jsonError } from "@/lib/api-helpers";
+import { invalidRequest, jsonError, tooLarge } from "@/lib/api-helpers";
 import { memoryService } from "@/lib/memory";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const MAX_PROFILE_BODY_CHARS = 8_000;
 
 export async function GET(): Promise<Response> {
   try {
@@ -14,9 +16,13 @@ export async function GET(): Promise<Response> {
 }
 
 export async function PUT(request: Request): Promise<Response> {
+  const raw = await request.text();
+  if (raw.length > MAX_PROFILE_BODY_CHARS) {
+    return tooLarge(`Profile payload is limited to ${MAX_PROFILE_BODY_CHARS} characters.`);
+  }
   let body: unknown;
   try {
-    body = await request.json();
+    body = JSON.parse(raw);
   } catch {
     return invalidRequest("Invalid JSON request body.");
   }

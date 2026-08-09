@@ -10,8 +10,9 @@ import { conversationManager } from "@/lib/ai/conversation-manager";
 import { memoryClient } from "@/lib/memory/client";
 import { soundFX } from "@/lib/audio/sound-service";
 import type { HealthSummary, ProviderStatusDetail } from "@/lib/ai/types";
-import { Mic, Eye, Brain, Zap, Globe, Key, Check, ExternalLink, AlertTriangle, RefreshCw, Volume2, VolumeX, Play } from "lucide-react";
+import { Mic, Eye, Brain, Zap, Globe, Key, Check, ExternalLink, AlertTriangle, RefreshCw, Volume2, VolumeX, Play, Lock } from "lucide-react";
 import { formatTimestampTime } from "@/lib/time/time-service";
+import { getApiToken, setApiToken } from "@/lib/api/auth";
 
 type ProviderKey = "gemini" | "openai" | "anthropic" | "ollama";
 
@@ -66,6 +67,8 @@ export default function SettingsPage() {
   const [testingKey, setTestingKey] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
   const [privacyMemoryEnabled, setPrivacyMemoryEnabled] = useState(true);
+  const [apiToken, setApiTokenValue] = useState(() => getApiToken());
+  const [tokenSaved, setTokenSaved] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(soundFX.isEnabled());
   const [soundVolume, setSoundVolume] = useState(
     Math.round(soundFX.getVolume() * 100)
@@ -115,6 +118,12 @@ export default function SettingsPage() {
     }
     setTestingKey(false);
   }, [apiKey]);
+
+  const saveApiToken = useCallback(() => {
+    setApiToken(apiToken);
+    setTokenSaved(true);
+    setTimeout(() => setTokenSaved(false), 2000);
+  }, [apiToken]);
 
   const testConnection = useCallback(async () => {
     setTestingConnection(true);
@@ -292,6 +301,35 @@ export default function SettingsPage() {
                 <Check className="w-3 h-3" /> AI is active — all features enabled
               </p>
             )}
+          </GlassCard>
+
+          <GlassCard className="p-5 mb-4 border-cyan-500/20">
+            <div className="flex items-center gap-2 mb-3">
+              <Lock className="w-4 h-4 text-cyan-400" />
+              <h2 className="text-sm text-white/70">API Access Token</h2>
+            </div>
+            <p className="text-xs text-white/30 mb-3">
+              Optional. When the server runs with{" "}
+              <code className="text-cyan-400/80">JARVIS_API_TOKEN</code> set, every
+              /api request must present this token. The dashboard sends it
+              automatically. Keep this empty to leave the API open on localhost.
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="password"
+                value={apiToken}
+                onChange={(e) => setApiTokenValue(e.target.value)}
+                placeholder="Shared token (matches JARVIS_API_TOKEN)"
+                className="flex-1 px-3 py-2 rounded-xl bg-white/[0.03] border border-white/[0.05] text-sm text-white/70 placeholder:text-white/20 outline-none focus:border-cyan-500/40 focus:shadow-[0_0_16px_rgba(56,189,248,0.08)] transition-all"
+              />
+              <Button size="sm" onClick={saveApiToken} variant={tokenSaved ? "secondary" : "default"}>
+                {tokenSaved ? (
+                  <><Check className="w-3.5 h-3.5 mr-1" /> Saved</>
+                ) : (
+                  "Save"
+                )}
+              </Button>
+            </div>
           </GlassCard>
 
           <div className="grid gap-4">

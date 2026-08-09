@@ -25,6 +25,7 @@ import { OpenAIProvider } from "./providers/openai";
 import type { AIProvider } from "./providers/types";
 import { describeRoles, roleModelName, type ModelRole } from "./router";
 import { executeTool, initToolRouter } from "@/services/tools";
+import { agentToolBlockMessage, isAgentToolAllowed } from "@/services/tools/agent-policy";
 import { APP_VERSION } from "./version";
 import type {
   AIMessageInput,
@@ -768,6 +769,18 @@ export class AIProviderService {
       next.push({ role: "assistant", content: content || "" });
       initToolRouter();
       for (const call of toolCalls) {
+        if (!isAgentToolAllowed(call.name)) {
+          this.log.warn("Agent requested a blocked tool", {
+            provider: provider.name,
+            tool: call.name,
+          });
+          next.push({
+            role: "tool",
+            content: JSON.stringify({ error: agentToolBlockMessage(call.name) }),
+            name: call.name,
+          });
+          continue;
+        }
         const result = await executeTool(call.name, call.arguments);
         const output = result.ok
           ? JSON.stringify(result.data)

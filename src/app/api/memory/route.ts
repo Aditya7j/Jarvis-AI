@@ -1,10 +1,13 @@
-import { invalidRequest, jsonError } from "@/lib/api-helpers";
+import { invalidRequest, jsonError, tooLarge } from "@/lib/api-helpers";
 import { memoryService } from "@/lib/memory";
 import { isMemoryCategory } from "@/lib/memory/sanitize";
 import type { MemoryEntryInput } from "@/lib/memory/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const MAX_CONTENT_CHARS = 8_000;
+const MAX_NOTE_CHARS = 500;
 
 export async function GET(request: Request): Promise<Response> {
   try {
@@ -40,6 +43,17 @@ export async function POST(request: Request): Promise<Response> {
   const record = body as Record<string, unknown>;
   if (typeof record.content !== "string" || !record.content.trim()) {
     return invalidRequest("Memory content is required.");
+  }
+  if (record.content.length > MAX_CONTENT_CHARS) {
+    return tooLarge(
+      `Memory content is limited to ${MAX_CONTENT_CHARS} characters.`
+    );
+  }
+  if (
+    typeof record.note === "string" &&
+    record.note.length > MAX_NOTE_CHARS
+  ) {
+    return tooLarge(`Memory notes are limited to ${MAX_NOTE_CHARS} characters.`);
   }
   const input: MemoryEntryInput = {
     content: record.content,

@@ -2,6 +2,7 @@
 
 import { detectSpeechLanguage } from "@/lib/lang/detect";
 import { JARVIS_VOICE_PROFILE } from "@/lib/tts-profile";
+import { withAuthHeaders } from "@/lib/api/auth";
 
 const CHUNK_MAX_CHARS = 200;
 const SPEAK_AFTER_CANCEL_MS = 80;
@@ -19,7 +20,7 @@ async function piperAvailable(): Promise<boolean> {
     return piperStatusCache.available;
   }
   try {
-    const res = await fetch("/api/tts/status");
+    const res = await fetch("/api/tts/status", withAuthHeaders());
     const body = (await res.json()) as { piper?: { available?: boolean } };
     piperStatusCache = {
       available: Boolean(body?.piper?.available),
@@ -181,11 +182,11 @@ class TTSManager {
     generation: number,
     onEnd?: () => void
   ): Promise<boolean> {
-    const res = await fetch("/api/tts/speak", {
+    const res = await fetch("/api/tts/speak", withAuthHeaders({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: cleanForSpeech(text) }),
-    });
+    }));
     if (!res.ok) return false;
     const arrayBuffer = await res.arrayBuffer();
     if (generation !== this.generation) return true;

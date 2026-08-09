@@ -61,8 +61,15 @@ export function isHallucination(args: {
   llmInvoked: boolean;
   toolBacked: boolean;
   verifiedFactCount: number;
+  grounded?: boolean;
 }): boolean {
-  return args.llmInvoked && args.toolBacked && args.verifiedFactCount === 0;
+  // `grounded` is an explicit claim that the response was backed by something
+  // verifiable. It defaults to `verifiedFactCount > 0` so every existing caller
+  // keeps its behavior; vision supplies it explicitly because a vision-LLM
+  // answer is grounded by a Gemma analysis (not by a VerifiedFact) and the
+  // count alone cannot express that.
+  const grounded = args.grounded ?? args.verifiedFactCount > 0;
+  return args.llmInvoked && args.toolBacked && !grounded;
 }
 
 class HallucinationMonitor {

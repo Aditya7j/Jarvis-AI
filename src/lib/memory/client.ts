@@ -8,6 +8,7 @@ import type {
   OwnerProfile,
   ProfileInput,
 } from "./types";
+import { getApiToken } from "@/lib/api/auth";
 
 interface ErrorBody {
   error?: { message?: string; code?: string };
@@ -17,10 +18,15 @@ async function request<T>(
   path: string,
   init?: RequestInit
 ): Promise<T> {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  const token = getApiToken();
+  if (token && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const response = await fetch(path, { ...init, headers });
   const payload = (await response.json().catch(() => null)) as
     | (T & ErrorBody)
     | null;

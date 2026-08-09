@@ -224,6 +224,13 @@ describe("assertFactInvariant — time", () => {
     expect(violation?.expected).toMatch(/^\d{1,2}:\d{2}$/);
   });
 
+  it("derives the expected H:MM from the canonical time string the user saw", () => {
+    const t = fact("get_current_time", "the time", { unixMs: 1754064000000, time: "3:45 PM GMT+5:30" });
+    expect(assertFactInvariant("time", [t], "It is 3:45 right now.", "english")).toBeNull();
+    const wrong = assertFactInvariant("time", [t], "It is 9:00 right now.", "english");
+    expect(wrong).not.toBeNull();
+  });
+
   it("returns null when unixMs is missing", () => {
     expect(assertFactInvariant("time", [fact("get_current_time", "t", {})], "anything", "english")).toBeNull();
   });
@@ -239,6 +246,20 @@ describe("assertFactInvariant — date", () => {
   it("rejects text missing the verified date", () => {
     const violation = assertFactInvariant("date", [dateFact], "Today is Wednesday.", "english");
     expect(violation?.expected).toBe("August 15, 2026");
+  });
+
+  it("rejects the right day and year with the wrong month", () => {
+    const violation = assertFactInvariant("date", [dateFact], "Today is September 15, 2026.", "english");
+    expect(violation).not.toBeNull();
+    expect(violation?.expected).toBe("August 15, 2026");
+  });
+
+  it("accepts a Hindi answer naming the correct Hindi month", () => {
+    expect(assertFactInvariant("date", [dateFact], "आज 15 अगस्त 2026 है।", "hindi")).toBeNull();
+  });
+
+  it("accepts text that spells the month number instead of its name", () => {
+    expect(assertFactInvariant("date", [dateFact], "Today is 15/8/2026.", "english")).toBeNull();
   });
 
   it("returns null when the date string cannot be parsed", () => {

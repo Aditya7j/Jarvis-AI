@@ -1,5 +1,5 @@
 import { aiService, toErrorPayload } from "@/lib/ai";
-import { invalidRequest, jsonError } from "@/lib/api-helpers";
+import { invalidRequest, jsonError, tooLarge } from "@/lib/api-helpers";
 import { aiLogger } from "@/lib/ai/logger";
 import type { VisionAnalysisSummary } from "@/lib/ai/prompts";
 import {
@@ -9,6 +9,11 @@ import {
 } from "@/services/chat";
 
 export const runtime = "nodejs";
+
+const MAX_MESSAGES = 50;
+const MAX_MESSAGE_CHARS = 12_000;
+const MAX_TOTAL_CHARS = 40_000;
+const MAX_FRAME_IMAGE_CHARS = 8_000_000;
 
 interface ChatMessageBody {
   role?: string;
@@ -241,6 +246,33 @@ export async function POST(request: Request): Promise<Response> {
 
   if (messages.length === 0) {
     return invalidRequest("No message content provided.");
+  }
+  if (messages.length > MAX_MESSAGES) {
+    return tooLarge(
+      `Chat history is limited to ${MAX_MESSAGES} messages per request.`
+    );
+  }
+  let totalChars = 0;
+  for (const message of messages) {
+    totalChars += message.content.length;
+    if (message.content.length > MAX_MESSAGE_CHARS) {
+      return tooLarge(
+        `Individual messages are limited to ${MAX_MESSAGE_CHARS} characters.`
+      );
+    }
+  }
+  if (totalChars > MAX_TOTAL_CHARS) {
+    return tooLarge(
+      `Chat history is limited to ${MAX_TOTAL_CHARS} characters per request.`
+    );
+  }
+  for (const frame of body.vision?.frames ?? []) {
+    if ((frame.image?.length ?? 0) > MAX_FRAME_IMAGE_CHARS) {
+      return tooLarge("Vision frame is too large.");
+    }
+  }
+  if ((body.vision?.image?.length ?? 0) > MAX_FRAME_IMAGE_CHARS) {
+    return tooLarge("Vision image is too large.");
   }
 
   const log = aiLogger.child("chat");

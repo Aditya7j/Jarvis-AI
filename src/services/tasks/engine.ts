@@ -32,6 +32,18 @@ async function defaultRunner(
   args: Record<string, unknown>,
   signal?: AbortSignal
 ): Promise<ToolResult> {
+  const { isAgentToolAllowed } = await import("../tools/agent-policy");
+  if (!isAgentToolAllowed(type)) {
+    return {
+      ok: false,
+      error: {
+        code: "ACTION_NOT_ALLOWED",
+        message: `Task action tool "${type}" is not on the agent allow-list.`,
+        retryable: false,
+      },
+      meta: { name: type, startedAt: Date.now(), durationMs: 0, attempts: 1, cacheHit: false, timedOut: false },
+    };
+  }
   const { executeTool } = await import("../tools/executor");
   return executeTool(type, args, { signal });
 }

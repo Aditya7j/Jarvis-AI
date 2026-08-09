@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Radio, BarChart3 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { authQueryString, withAuthHeaders } from "@/lib/api/auth";
 import {
   getClientStats,
   subscribeClientStats,
@@ -95,7 +96,7 @@ export function MetricsPanel() {
 
   useEffect(() => {
     let mounted = true;
-    fetch("/api/metrics/summary")
+    fetch("/api/metrics/summary", withAuthHeaders())
       .then((res) => (res.ok ? res.json() : null))
       .then((data: MetricsSnapshot | null) => {
         if (!mounted || !data) return;
@@ -116,7 +117,7 @@ export function MetricsPanel() {
   }, []);
 
   useEffect(() => {
-    const source = new EventSource("/api/metrics/events");
+    const source = new EventSource("/api/metrics/events" + authQueryString());
     const onMetric = (event: MessageEvent) => {
       try {
         const metric = JSON.parse(event.data) as ModelRequestMetric;
@@ -144,7 +145,7 @@ export function MetricsPanel() {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      fetch("/api/metrics/summary")
+      fetch("/api/metrics/summary", withAuthHeaders())
         .then((res) => (res.ok ? res.json() : null))
         .then((data: MetricsSnapshot | null) => {
           if (data) setSnapshot(data);

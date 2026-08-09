@@ -1,9 +1,11 @@
 import { synthesizeSpeech } from "@/lib/ai/piper";
 import { aiLogger } from "@/lib/ai/logger";
+import { tooLarge } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 
 const log = aiLogger.child("tts-api");
+const MAX_TEXT_CHARS = 2_000;
 
 export async function POST(request: Request): Promise<Response> {
   let text: string;
@@ -22,6 +24,10 @@ export async function POST(request: Request): Promise<Response> {
       { error: { code: "INVALID_REQUEST", message: "No text provided." } },
       { status: 400 }
     );
+  }
+
+  if (text.length > MAX_TEXT_CHARS) {
+    return tooLarge(`Speech text is limited to ${MAX_TEXT_CHARS} characters.`);
   }
 
   const result = await synthesizeSpeech(text);
