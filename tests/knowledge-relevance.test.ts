@@ -11,8 +11,10 @@
  *    answered from, and the answer never echoes the alias.
  * 3. A DuckDuckGo result whose only content is a bare title is never accepted
  *    as an answer; the Wikipedia fallback continues.
- * 4. Hinglish knowledge questions are not treated as officeholder/capital
- *    questions.
+ * 4. Hinglish rank-qualified ("pehla … kaun tha") AND plain officeholder
+ *    questions ("India ka pradhan mantri kaun hai?") are treated like their
+ *    English shapes, while definitional Hinglish ("kya hai") questions stay
+ *    generic.
  * All network calls are mocked — no live requests.
  */
 
@@ -23,6 +25,8 @@ import {
   classifyKnowledgeQuery,
   invalidateSearchCache,
   isContentfulTopicText,
+  parseHinglishOfficeholderOffice,
+  parseHinglishRankQualifiedOffice,
   parseRankQualifiedOffice,
   webSearch,
 } from "@/lib/toolkit/web";
@@ -180,6 +184,76 @@ describe("parseRankQualifiedOffice", () => {
   });
 });
 
+describe("parseHinglishRankQualifiedOffice", () => {
+  it("parses 'India ka pehla Sikh Prime Minister kaun tha?' into the English parts", () => {
+    const parsed = parseHinglishRankQualifiedOffice("India ka pehla Sikh Prime Minister kaun tha?");
+    expect(parsed?.rank).toBe("first");
+    expect(parsed?.office).toBe("sikh prime minister");
+    expect(parsed?.officeNoun).toBe("minister");
+    expect(parsed?.qualifiers).toEqual(["sikh", "prime"]);
+    expect(parsed?.place).toBe("india");
+  });
+
+  it("handles the topicalized order 'kaun tha India ka pichhla PM?'", () => {
+    const parsed = parseHinglishRankQualifiedOffice("kaun tha India ka pichhla PM?");
+    expect(parsed?.rank).toBe("previous");
+    expect(parsed?.office).toBe("prime minister");
+    expect(parsed?.officeNoun).toBe("minister");
+    expect(parsed?.place).toBe("india");
+  });
+
+  it("expands Hindi office phrases and canonicalizes place aliases", () => {
+    const parsed = parseHinglishRankQualifiedOffice("Bharat ka pehla pradhan mantri kaun tha?");
+    expect(parsed?.rank).toBe("first");
+    expect(parsed?.office).toBe("prime minister");
+    expect(parsed?.officeNoun).toBe("minister");
+    expect(parsed?.place).toBe("bharat");
+    expect(parsed?.canonicalPlace).toBe("India");
+  });
+
+  it("returns null for definitional 'kya hai' questions and English-only shapes", () => {
+    expect(parseHinglishRankQualifiedOffice("React kya hai?")).toBeNull();
+    expect(parseHinglishRankQualifiedOffice("Weather kaisa hai?")).toBeNull();
+    expect(parseHinglishRankQualifiedOffice("Who is the first Sikh PM of India?")).toBeNull();
+  });
+});
+
+describe("parseHinglishOfficeholderOffice", () => {
+  it("parses 'India ka pradhan mantri kaun hai?' into office + place", () => {
+    const parsed = parseHinglishOfficeholderOffice("India ka pradhan mantri kaun hai?");
+    expect(parsed?.office).toBe("prime minister");
+    expect(parsed?.place).toBe("india");
+    expect(parsed?.canonicalPlace).toBeNull();
+  });
+
+  it("expands Hindi office phrases and canonicalizes place aliases", () => {
+    const parsed = parseHinglishOfficeholderOffice("Bharat ke rashtrapati kaun hai?");
+    expect(parsed?.office).toBe("president");
+    expect(parsed?.place).toBe("bharat");
+    expect(parsed?.canonicalPlace).toBe("India");
+  });
+
+  it("handles the topicalized order 'kaun hai America ka president?'", () => {
+    const parsed = parseHinglishOfficeholderOffice("kaun hai America ka president?");
+    expect(parsed?.office).toBe("president");
+    expect(parsed?.place).toBe("america");
+  });
+
+  it("accepts the polite plural 'kaun hain'", () => {
+    const parsed = parseHinglishOfficeholderOffice("India ke pradhan mantri kaun hain?");
+    expect(parsed?.office).toBe("prime minister");
+    expect(parsed?.place).toBe("india");
+  });
+
+  it("returns null for past-tense, place-fact and definitional questions", () => {
+    expect(parseHinglishOfficeholderOffice("India ka pradhan mantri kaun tha?")).toBeNull();
+    expect(parseHinglishOfficeholderOffice("India ka pehla pradhan mantri kaun tha?")).toBeNull();
+    expect(parseHinglishOfficeholderOffice("Bharat ki rajdhani kaun hai?")).toBeNull();
+    expect(parseHinglishOfficeholderOffice("React kya hai?")).toBeNull();
+    expect(parseHinglishOfficeholderOffice("Who is the current prime minister of India?")).toBeNull();
+  });
+});
+
 describe("classifyKnowledgeQuery", () => {
   it("detects rank-qualified questions before plain officeholder questions", () => {
     const cls = classifyKnowledgeQuery("Who was the first Sikh prime minister of India?");
@@ -196,6 +270,27 @@ describe("classifyKnowledgeQuery", () => {
     expect(cls.place).toBe("india");
   });
 
+  it("detects Hinglish rank-qualified questions", () => {
+    const cls = classifyKnowledgeQuery("India ka pehla Sikh Prime Minister kaun tha?");
+    expect(cls.kind).toBe("rank-qualified");
+    expect(cls.officeNoun).toBe("minister");
+    expect(cls.place).toBe("india");
+    expect(cls.rank).toBe("first");
+    expect(cls.qualifiers).toEqual(["sikh", "prime"]);
+  });
+
+  it("detects Hinglish plain officeholder questions", () => {
+    const cls = classifyKnowledgeQuery("India ka pradhan mantri kaun hai?");
+    expect(cls.kind).toBe("officeholder");
+    expect(cls.office).toBe("prime minister");
+    expect(cls.place).toBe("india");
+  });
+
+  it("keeps past-tense and place-fact Hinglish questions generic", () => {
+    expect(classifyKnowledgeQuery("India ka pradhan mantri kaun tha?").kind).toBe("generic");
+    expect(classifyKnowledgeQuery("Bharat ki rajdhani kya hai?").kind).toBe("generic");
+  });
+
   it("detects capital questions with a canonical place", () => {
     const cls = classifyKnowledgeQuery("What is the capital of USA?");
     expect(cls.kind).toBe("capital");
@@ -205,6 +300,7 @@ describe("classifyKnowledgeQuery", () => {
 
   it("treats generic and Hinglish questions as generic", () => {
     expect(classifyKnowledgeQuery("What is a JavaScript closure?").kind).toBe("generic");
+    expect(classifyKnowledgeQuery("What is React?").kind).toBe("generic");
     expect(classifyKnowledgeQuery("React kya hai?").kind).toBe("generic");
     expect(classifyKnowledgeQuery("What is the weather today?").kind).toBe("generic");
   });
@@ -280,6 +376,72 @@ describe("webSearch relevance gates (mocked)", () => {
     expect(result?.abstract).toContain("first Sikh prime minister");
   });
 
+  it("REJECTS a rank-qualified candidate whose content does not support the requested relationship", async () => {
+    // The requested relationship is "first Sikh prime minister OF INDIA".
+    // This candidate only shares the office noun ("minister") — its content
+    // never establishes rank, qualifiers or the place. It must be rejected.
+    ddgPayload = { Heading: "", AbstractText: "", Answer: "", RelatedTopics: [] };
+    SEARCH_RESPONSES.set(
+      "search:who was the first sikh prime minister of india",
+      searchResult(["Sukhdev Singh Barnala"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Sukhdev Singh Barnala",
+      "Prime Minister of Punjab"
+    );
+    const result = await webSearch("who was the first sikh prime minister of india");
+    expect(result).toBeNull();
+  });
+
+  it("ACCEPTS a rank-qualified candidate whose content establishes rank, qualifiers, office and place", async () => {
+    ddgPayload = { Heading: "", AbstractText: "", Answer: "", RelatedTopics: [] };
+    SEARCH_RESPONSES.set(
+      "search:who was the first sikh prime minister of india",
+      searchResult(["Manmohan Singh"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Manmohan Singh",
+      "Manmohan Singh was the first Sikh prime minister of India."
+    );
+    const result = await webSearch("who was the first sikh prime minister of india");
+    expect(result?.engine).toBe("Wikipedia");
+    expect(result?.heading).toBe("Manmohan Singh");
+    expect(result?.abstract).toContain("first Sikh prime minister");
+    expect(result?.abstract).toContain("India");
+  });
+
+  it("answers a Hinglish rank-qualified question from content supporting rank, qualifiers, office and place", async () => {
+    // The fallback searches the office + place phrase ("sikh prime minister
+    // india") — that exact retry is mocked here.
+    ddgPayload = { Heading: "", AbstractText: "", Answer: "", RelatedTopics: [] };
+    SEARCH_RESPONSES.set(
+      "search:sikh prime minister india",
+      searchResult(["Manmohan Singh"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Manmohan Singh",
+      "Manmohan Singh was the first Sikh prime minister of India, serving 2004 to 2014."
+    );
+    const result = await webSearch("india ka pehla sikh prime minister kaun tha");
+    expect(result?.engine).toBe("Wikipedia");
+    expect(result?.heading).toBe("Manmohan Singh");
+    expect(result?.abstract).toContain("first Sikh prime minister");
+  });
+
+  it("REJECTS a Hinglish rank-qualified candidate whose content does not support the relationship", async () => {
+    ddgPayload = { Heading: "", AbstractText: "", Answer: "", RelatedTopics: [] };
+    SEARCH_RESPONSES.set(
+      "search:sikh prime minister india",
+      searchResult(["Sukhdev Singh Barnala"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Sukhdev Singh Barnala",
+      "Prime Minister of Punjab"
+    );
+    const result = await webSearch("india ka pehla sikh prime minister kaun tha");
+    expect(result).toBeNull();
+  });
+
   it("a title-only DuckDuckGo topic never becomes the answer — the Wikipedia fallback continues", async () => {
     ddgPayload = {
       Heading: "Event loop",
@@ -299,6 +461,42 @@ describe("webSearch relevance gates (mocked)", () => {
     expect(result?.engine).toBe("Wikipedia");
     expect(result?.abstract).toContain("dispatches events");
     expect(result?.abstract).not.toBe("Event loop");
+  });
+
+  it("a generic DuckDuckGo abstract that only shares a keyword loses to the Wikipedia fallback", async () => {
+    // The question is about "closure"; a JavaScript definition shares the
+    // keyword "JavaScript" but never names the subject. It must not win the
+    // race over a fallback that actually answers the question.
+    ddgPayload = {
+      Heading: "JavaScript",
+      AbstractText: "JavaScript is a high-level programming language used on the web.",
+      Answer: "",
+      RelatedTopics: [],
+    };
+    SEARCH_RESPONSES.set(
+      "search:what is a javascript closure",
+      searchResult(["Closure (computer programming)"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Closure (computer programming)",
+      "In programming languages, a closure is a technique of lexically binding names to values."
+    );
+    const result = await webSearch("what is a javascript closure");
+    expect(result?.engine).toBe("Wikipedia");
+    expect(result?.heading).toBe("Closure (computer programming)");
+  });
+
+  it("a generic DuckDuckGo result that names the subject wins the race", async () => {
+    ddgPayload = {
+      Heading: "Closure (computer programming)",
+      AbstractText:
+        "In programming languages, a closure, also lexical closure or function closure, is a technique for implementing lexically scoped name binding.",
+      Answer: "",
+      RelatedTopics: [],
+    };
+    const result = await webSearch("what is a javascript closure");
+    expect(result?.engine).toBe("DuckDuckGo");
+    expect(result?.abstract).toContain("closure");
   });
 
   it("fails honestly (null) when DuckDuckGo is irrelevant and the fallback finds nothing", async () => {
@@ -327,6 +525,25 @@ describe("webSearch relevance gates (mocked)", () => {
     );
     const result = await webSearch("who is the current prime minister of india");
     expect(result?.answer).toContain("Narendra Modi");
+    expect(fetchCalls().some((u) => u.includes("api.duckduckgo.com"))).toBe(false);
+  });
+
+  it("answers a Hinglish officeholder question from the infobox incumbent, skipping DuckDuckGo", async () => {
+    // "india ka pradhan mantri kaun hai" is classified officeholder: it skips
+    // DuckDuckGo, searches the office + place phrase ("prime minister india")
+    // and reads the incumbent field of the matched article.
+    SEARCH_RESPONSES.set(
+      "search:prime minister india",
+      searchResult(["Prime Minister of India"])
+    );
+    SEARCH_RESPONSES.set(
+      "wt:Prime Minister of India",
+      "{{Infobox officeholder\n| office = Prime Minister of India\n| incumbent = [[Narendra Modi]]\n}}"
+    );
+    const result = await webSearch("india ka pradhan mantri kaun hai");
+    expect(result?.engine).toBe("Wikipedia");
+    expect(result?.answer).toContain("Narendra Modi");
+    expect(result?.answer).toContain("Prime Minister of India");
     expect(fetchCalls().some((u) => u.includes("api.duckduckgo.com"))).toBe(false);
   });
 });

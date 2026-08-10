@@ -5,8 +5,12 @@
  * Locks the fixes:
  *   1. "What is not X?" reasons — the web returns unrelated pages for it.
  *   2. A rank-qualified office question ("who is the FIRST x of y?") never
- *      answers with the current incumbent: when the web has no usable answer
- *      the pipeline defers to the reasoning model instead of a canned refusal.
+ *      answers with the current incumbent and never lets the model guess:
+ *      when the web has no usable answer it refuses honestly.
+ *   2b. A GENERIC search question ("who invented the telephone?") with an
+ *      unverifiable web result still defers to the reasoning model — verified-
+ *      factual queries refuse, but a definition/explanation question may be
+ *      answered from the model's own knowledge.
  *   3. Genuine search AVAILABILITY failures (network down) still refuse — the
  *      model is never asked to guess when the web simply could not be reached.
  *   4. "What is React?" reasons from training — it never hits the web and
@@ -140,8 +144,10 @@ describe("the 8-question acceptance set (offline pipeline)", () => {
     expect(webSearch).not.toHaveBeenCalled();
   });
 
-  it("first Sikh PM: search yields nothing usable → defers to reasoning, never the current incumbent", async () => {
+  it("first Sikh PM: search yields nothing usable → honest refusal, never the current incumbent and never a model guess", async () => {
     // A null search result is an unverifiable content failure (VERIFICATION_FAILED).
+    // Rank-qualified questions are verified-factual: with no verified source the
+    // pipeline refuses rather than letting the model guess the answer.
     (webSearch as Mock).mockResolvedValue(null);
     const model = fakeModel(["Manmohan Singh was the first Sikh Prime Minister of India, serving 2004-2014."]);
     const spy = vi.spyOn(model, "streamText");
@@ -150,9 +156,64 @@ describe("the 8-question acceptance set (offline pipeline)", () => {
     const tool = toolOf(events);
     expect(tool?.tool).toBe("web_search");
     expect(tool?.ok).toBe(false);
+    expect(sourceOf(events)).toBe("tool");
+    expect(spy).not.toHaveBeenCalled();
+    expect(tokensOf(events)).toContain("the required source is unavailable");
+  });
+
+  it("Hinglish rank-qualified: search yields nothing usable → honest refusal, never a model guess", async () => {
+    // "India ka pehla Sikh Prime Minister kaun tha?" classifies as
+    // rank-qualified — a verified-factual query. With no verified source the
+    // pipeline refuses instead of letting the model guess the answer.
+    (webSearch as Mock).mockResolvedValue(null);
+    const model = fakeModel(["Manmohan Singh was the first Sikh Prime Minister of India."]);
+    const spy = vi.spyOn(model, "streamText");
+    const events = await collect("India ka pehla Sikh Prime Minister kaun tha?", model);
+    expect(planOf(events)?.intent).toBe("search");
+    const tool = toolOf(events);
+    expect(tool?.tool).toBe("web_search");
+    expect(tool?.ok).toBe(false);
+    expect(sourceOf(events)).toBe("tool");
+    expect(spy).not.toHaveBeenCalled();
+    // The refusal is localized to Hinglish for this prompt — assert the
+    // language-neutral core instead of the exact English wording.
+    expect(tokensOf(events)).toContain("required source");
+  });
+
+  it("Hinglish officeholder: search yields nothing usable → honest refusal, never a model guess", async () => {
+    // "India ka pradhan mantri kaun hai?" is now classified officeholder — a
+    // verified-factual query, same as its rank-qualified sibling. With no
+    // verified source the pipeline refuses instead of letting the model guess.
+    (webSearch as Mock).mockResolvedValue(null);
+    const model = fakeModel(["Narendra Modi is the Prime Minister of India."]);
+    const spy = vi.spyOn(model, "streamText");
+    const events = await collect("India ka pradhan mantri kaun hai?", model);
+    expect(planOf(events)?.intent).toBe("search");
+    const tool = toolOf(events);
+    expect(tool?.tool).toBe("web_search");
+    expect(tool?.ok).toBe(false);
+    expect(sourceOf(events)).toBe("tool");
+    expect(spy).not.toHaveBeenCalled();
+    // The refusal is localized to Hinglish for this prompt — assert the
+    // language-neutral core instead of the exact English wording.
+    expect(tokensOf(events)).toContain("required source");
+  });
+
+  it("a generic search question with an unverifiable result still defers to reasoning, never refuses", async () => {
+    // "who invented the telephone" is verified-factual in intent but GENERIC by
+    // classification: no office/capital shape. An unverifiable web result must
+    // not force a refusal — the model answers from its own knowledge.
+    (webSearch as Mock).mockResolvedValue(null);
+    const model = fakeModel(["Alexander Graham Bell invented the telephone in 1876."]);
+    const spy = vi.spyOn(model, "streamText");
+    const events = await collect("Who invented the telephone?", model);
+    expect(planOf(events)?.intent).toBe("search");
+    const tool = toolOf(events);
+    expect(tool?.tool).toBe("web_search");
+    expect(tool?.ok).toBe(false);
     expect(sourceOf(events)).toBe("reasoning");
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(tokensOf(events)).toContain("Manmohan Singh was the first Sikh Prime Minister");
+    expect(tokensOf(events)).toContain("Alexander Graham Bell");
   });
 
   it("Is the first Sikh PM of India? → reasoning, no tools", async () => {

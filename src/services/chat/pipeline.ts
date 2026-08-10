@@ -48,7 +48,7 @@ import { extractDateTokens } from "@/lib/time/date-calc";
 import type { VisionFrameInput } from "@/lib/vision/vision-manager";
 import type { AIMessageInput } from "@/lib/ai/types";
 import { parseConversionRequest } from "@/lib/toolkit/convert";
-import { enrichSearchQuery, isContentfulTopicText, normalizeCurrency, parseCurrencyRequest } from "@/lib/toolkit/web";
+import { classifyKnowledgeQuery, enrichSearchQuery, isContentfulTopicText, normalizeCurrency, parseCurrencyRequest } from "@/lib/toolkit/web";
 import { getContextEngine } from "@/services/context/context-engine";
 import type { BatteryFact, WeatherFact } from "@/lib/ai/system-tools";
 import {
@@ -1984,12 +1984,14 @@ export async function* runPipeline(
       fallbackReason =
         first && !first.ok ? first.error.code.toLowerCase() : "tool_failed";
       yield toolEvent(cls, toolsToRun[0], startedAt, false, fallbackReason);
-      // Search is the only naturalize class whose empty/failed CONTENT the
-      // reasoning model can absorb honestly: when the web tool returned
-      // nothing usable (a JSON parse failure or an unverifiable empty result),
-      // hand the question back to the LLM instead of a canned refusal.
-      // Genuine availability failures (network down, timeout, cancelled) still
-      // refuse rather than guess — that contract is locked by knowledge.test.ts.
+      // A failed verification must never become an opportunity for the model to
+      // guess. Only a GENERIC reasoning/definition question ("What is React?")
+      // may be answered from the model's own knowledge when the web tool found
+      // nothing usable (a JSON parse failure or an unverifiable empty result).
+      // Verified-factual questions (officeholder, capital, rank-qualified) with
+      // no verified source get an honest unavailable reply instead — the web is
+      // the only acceptable source for them. Genuine availability failures
+      // (network down, timeout, cancelled) still refuse rather than guess.
       const searchContentFailure =
         cls === "search" &&
         toolsToRun.includes("web_search") &&
@@ -1998,6 +2000,27 @@ export async function* runPipeline(
         (first.error.code === "SyntaxError" ||
           first.error.code === "VERIFICATION_FAILED");
       if (searchContentFailure) {
+        const searchQuery =
+          (argFor("web_search") as { query?: string } | undefined)?.query ?? q;
+        if (classifyKnowledgeQuery(searchQuery).kind !== "generic") {
+          fallbackReason = "verification_failed";
+          yield { kind: "token", text: localizeReply(language, "toolUnavailable") };
+          source = "tool";
+          yield* finish({
+            requestId,
+            prompt,
+            cls,
+            routeKind: route.kind,
+            source,
+            tools: toolTraces,
+            verifiedFactCount: facts.length,
+            llmInvoked,
+            startedAt,
+            options,
+            fallbackReason,
+          });
+          return;
+        }
         yield { kind: "status", phase: "answering" };
         source = "reasoning";
         llmInvoked = true;

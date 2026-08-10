@@ -288,6 +288,8 @@ const PLACE_ALIASES: Record<string, string> = {
   "great britain": "United Kingdom",
   uae: "United Arab Emirates",
   "u.a.e.": "United Arab Emirates",
+  bharat: "India",
+  hindustan: "India",
 };
 
 /**
@@ -303,15 +305,8 @@ export function canonicalPlaceOf(place: string): string | null {
 }
 
 /**
- * Rank-qualified officeholder questions ("who is/was the FIRST Sikh prime
- * minister of India?"). These can never be answered by the current-incumbent
- * infobox branch — answering a "first/last/previous" question with whoever
- * holds the office TODAY is the exact wrong-answer regression.
+ * Core office noun of a rank-qualified question ("...first sikh prime minister of india" → "minister").
  */
-const RANK_QUALIFIED_OFFICE =
-  /\bwho\s+(?:is|was)\s+(?:the\s+)?(?:first|last|previous|former|next|oldest|youngest|earliest|latest|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b/i;
-
-/** Core office noun of a rank-qualified question ("...first sikh prime minister of india" → "minister"). */
 export function officeNounOf(q: string): string | null {
   const m = q.toLowerCase().trim().match(
     /\bwho\s+(?:is|was)\s+(?:the\s+)?(?:first|last|previous|former|next|oldest|youngest|earliest|latest|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(.+?)\s+of\s+(.+?)\s*[?.!]?\s*$/
@@ -361,6 +356,147 @@ export function parseRankQualifiedOffice(q: string): RankQualifiedOffice | null 
   };
 }
 
+/** Hinglish rank words mapped to the English content word articles use. */
+const HINGLISH_RANK_WORDS: Record<string, string> = {
+  pehla: "first",
+  pehli: "first",
+  pehle: "first",
+  pahla: "first",
+  pahli: "first",
+  "sabse pehla": "first",
+  "sabse pehle": "first",
+  aakhri: "last",
+  akhri: "last",
+  aakhir: "last",
+  pichhla: "previous",
+  pichhle: "previous",
+  pichhli: "previous",
+  pichla: "previous",
+  agla: "next",
+  agle: "next",
+  agli: "next",
+  doosra: "second",
+  dusra: "second",
+  teesra: "third",
+  tisra: "third",
+  chautha: "fourth",
+  purana: "former",
+  purani: "former",
+  "sabse purana": "oldest",
+  "sabse chhota": "youngest",
+  "sabse naya": "latest",
+};
+
+/** Hinglish/Hindi office phrases expanded to the English phrase article content uses. */
+const HINGLISH_OFFICE_EXPANSIONS: Record<string, string> = {
+  "pradhan mantri": "prime minister",
+  pradhanmantri: "prime minister",
+  "mukhya mantri": "chief minister",
+  mukhyamantri: "chief minister",
+  mantri: "minister",
+  rashtrapati: "president",
+  uprashtrapati: "vice president",
+  pm: "prime minister",
+  cm: "chief minister",
+};
+
+/** Expand a Hinglish/Hindi office phrase to the English phrase article content uses. */
+function expandHinglishOffice(office: string): string {
+  for (const [hing, eng] of Object.entries(HINGLISH_OFFICE_EXPANSIONS)) {
+    const re = new RegExp(`\\b${hing.replace(/\s+/g, "\\s+")}\\b`);
+    if (re.test(office)) return office.replace(re, eng);
+  }
+  return office;
+}
+
+/**
+ * Parse a Hinglish rank-qualified officeholder question ("India ka pehla Sikh
+ * Prime Minister kaun tha?") into the same parts as the English shape: place
+ * ("india"), rank ("first"), office phrase ("sikh prime minister"), core noun
+ * ("minister") and qualifiers ("sikh", "prime"). Both the canonical order
+ * ("<place> ka/ke/ki <rank> <office> kaun <verb>") and the topicalized order
+ * ("kaun <verb> <place> ka/ke/ki <rank> <office>") are accepted. Only matches
+ * when a factual noun precedes the Hinglish interrogative, so definitional
+ * "kya hai" questions stay generic. Returns null for anything else.
+ */
+export function parseHinglishRankQualifiedOffice(q: string): RankQualifiedOffice | null {
+  const text = q.toLowerCase().trim();
+  const post = "(?:ka|ke|ki)";
+  const rankSrc =
+    "(?:sabse\\s+)?(?:pehla|pehli|pehle|pahla|pahli|aakhri|akhri|aakhir|pichhla|pichhle|pichhli|pichla|agla|agle|agli|doosra|dusra|teesra|tisra|chautha|purana|purani)";
+  const verb = "(?:hai|tha|thi|the|hain|thay|hoga|hogi|honge)";
+  const m = text.match(
+    new RegExp(`^(.+?)\\s+${post}\\s+(${rankSrc})\\s+(.+?)\\s+kaun\\s+${verb}[?.!]?\\s*$`)
+  );
+  const mTop = !m
+    ? text.match(
+        new RegExp(`^kaun\\s+${verb}\\s+(.+?)\\s+${post}\\s+(${rankSrc})\\s+(.+?)[?.!]?\\s*$`)
+      )
+    : null;
+  if (!m && !mTop) return null;
+  const place = (m ? m[1] : mTop![1]).trim();
+  const rankRaw = (m ? m[2] : mTop![2]).trim();
+  let office = (m ? m[3] : mTop![3]).trim();
+  if (place.length < 2) return null;
+  if (/\b(?:you|this|that|it|there|mera|tera|aapka|tumhara)\b/.test(place)) return null;
+  const rank = HINGLISH_RANK_WORDS[rankRaw] ?? rankRaw;
+  // Expand short forms ("pm" → "prime minister") and Hindi office phrases
+  // ("pradhan mantri") BEFORE the length guard so abbreviations survive it.
+  office = expandHinglishOffice(office);
+  if (office.length < 3) return null;
+  const words = office.split(/\s+/).filter((w) => w.length >= 3 && !SEARCH_STOPWORDS.has(w));
+  const officeNoun = words[words.length - 1] ?? "";
+  if (!officeNoun) return null;
+  return {
+    rank,
+    office,
+    officeNoun,
+    qualifiers: words.slice(0, -1),
+    place,
+    canonicalPlace: canonicalPlaceOf(place),
+  };
+}
+
+export interface HinglishOfficeholderOffice {
+  office: string;
+  place: string;
+  canonicalPlace: string | null;
+}
+
+/**
+ * Parse a Hinglish officeholder question with NO rank qualifier ("India ka
+ * pradhan mantri kaun hai?") into office + place, so it gets the same
+ * verified-factual treatment as the English "who is the X of Y?" shape: the
+ * answer comes from the article's infobox incumbent and, when the source is
+ * unavailable, the pipeline refuses instead of asking the model to guess.
+ * Only present-tense person interrogatives ("kaun hai/hain") are accepted —
+ * a past-tense "kaun tha?" is time-ambiguous and its answer is never the
+ * current incumbent, and "kya hai" place-facts ("Bharat ki rajdhani …") ask
+ * WHAT, not WHO. Both the canonical ("<place> ka/ke/ki <office> kaun <verb>")
+ * and topicalized ("kaun <verb> <place> ka/ke/ki <office>") orders are
+ * accepted. Returns null for anything else.
+ */
+export function parseHinglishOfficeholderOffice(q: string): HinglishOfficeholderOffice | null {
+  const text = q.toLowerCase().trim();
+  const post = "(?:ka|ke|ki)";
+  const verb = "(?:hai|hain)";
+  const m = text.match(new RegExp(`^(.+?)\\s+${post}\\s+(.+?)\\s+kaun\\s+${verb}[?.!]?\\s*$`));
+  const mTop = !m
+    ? text.match(new RegExp(`^kaun\\s+${verb}\\s+(.+?)\\s+${post}\\s+(.+?)[?.!]?\\s*$`))
+    : null;
+  if (!m && !mTop) return null;
+  const place = (m ? m[1] : mTop![1]).trim();
+  let office = (m ? m[2] : mTop![2]).trim();
+  if (place.length < 2) return null;
+  if (/\b(?:you|this|that|it|there|mera|tera|aapka|tumhara)\b/.test(place)) return null;
+  office = expandHinglishOffice(office);
+  if (office.length < 3) return null;
+  // "Rajdhani" (capital) and other place-facts are WHAT-questions ("kya"),
+  // never WHO-questions — a person-office parser must not claim them.
+  if (/\b(?:rajdhani|capital|population|currency|language)\b/.test(office)) return null;
+  return { office, place, canonicalPlace: canonicalPlaceOf(place) };
+}
+
 export type KnowledgeQueryKind = "officeholder" | "rank-qualified" | "capital" | "generic";
 
 export interface KnowledgeQuery {
@@ -381,7 +517,7 @@ export interface KnowledgeQuery {
  * genuinely relevant to THIS query.
  */
 export function classifyKnowledgeQuery(q: string): KnowledgeQuery {
-  const rank = parseRankQualifiedOffice(q);
+  const rank = parseRankQualifiedOffice(q) ?? parseHinglishRankQualifiedOffice(q);
   if (rank) {
     return {
       kind: "rank-qualified",
@@ -393,7 +529,7 @@ export function classifyKnowledgeQuery(q: string): KnowledgeQuery {
       rank: rank.rank,
     };
   }
-  const office = parseOfficeQuestion(q);
+  const office = parseOfficeQuestion(q) ?? parseHinglishOfficeholderOffice(q);
   if (office) {
     return {
       kind: "officeholder",
@@ -726,6 +862,7 @@ export function extractCapitalName(wikitext: string): string | null {
  */
 async function searchKnowledgeFallback(
   query: string,
+  cls: KnowledgeQuery,
   timeoutMs: number,
   signal?: AbortSignal
 ): Promise<SearchResult | null> {
@@ -737,6 +874,18 @@ async function searchKnowledgeFallback(
   if (hits.length === 0) {
     const terms = queryKeywords(query);
     if (terms.length) hits = await searchWikipedia(terms.join(" "), timeoutMs, signal);
+  }
+  // The Hinglish shape ("india ka pehla sikh prime minister kaun tha", "india
+  // ka pradhan mantri kaun hai") carries interrogative/particle noise; the
+  // office + place phrase is the discriminating English content terms
+  // Wikipedia can actually match.
+  if (
+    hits.length === 0 &&
+    (cls.kind === "rank-qualified" || cls.kind === "officeholder") &&
+    cls.office &&
+    cls.place
+  ) {
+    hits = await searchWikipedia(`${cls.office} ${cls.place}`, timeoutMs, signal).catch(() => []);
   }
   if (hits.length === 0) {
     const suggestions = await opensearchSuggest(query, timeoutMs, signal).catch(() => []);
@@ -756,12 +905,14 @@ async function searchKnowledgeFallback(
   const keywords = queryKeywords(query);
   const anchors = anchorOf(query) ? [anchorOf(query)!] : [];
   const nouns = properNounsOf(query);
+  const structuredOffice =
+    cls.kind === "rank-qualified" || cls.kind === "officeholder" ? cls.office : null;
   const ranked = [...hits].sort((a, b) => {
-    if (parsed || officeLabel) {
+    if (parsed || officeLabel || structuredOffice) {
       // Use the parse (office only, place separate) when available; the bare
       // office label is a greedy match that includes the place when present.
-      const office = parsed ? parsed.office : (officeLabel ?? "");
-      const place = parsed?.place ?? "";
+      const office = parsed ? parsed.office : (structuredOffice ?? officeLabel ?? "");
+      const place = parsed?.place ?? cls.place ?? "";
       return scoreOfficeHit(b.title, office, place) - scoreOfficeHit(a.title, office, place);
     }
     if (capitalQuestion) {
@@ -788,20 +939,25 @@ async function searchKnowledgeFallback(
   const best = ranked[0];
 
   // Officeholder questions: read the article's infobox incumbent directly so
-  // "who is the current prime minister of india" answers with the person.
-  // Rank-qualified questions ("who is the FIRST x of y") are excluded — their
-  // answer is never the current officeholder.
-  if (parsed && !RANK_QUALIFIED_OFFICE.test(query)) {
+  // "who is the current prime minister of india" answers with the person —
+  // including the Hinglish shape ("india ka pradhan mantri kaun hai"), whose
+  // English-only parse is null but whose classification still carries the
+  // office and place. Rank-qualified questions ("who is the FIRST x of y" /
+  // "pehla … kaun tha") are excluded — their answer is never the current
+  // officeholder.
+  if ((parsed || cls.kind === "officeholder") && cls.kind !== "rank-qualified") {
     const wikitext = await fetchWikipediaWikitext(best.title, timeoutMs, signal).catch(() => null);
     const incumbent = wikitext ? extractIncumbentName(wikitext) : null;
     if (incumbent) {
+      const office = parsed ? parsed.office : cls.office ?? "";
+      const place = parsed ? parsed.place : cls.place ?? "";
       const officeDisplay =
-        best.title.replace(/\s+of\s+.*$/i, "").trim() || capitalizeWords(parsed.office);
+        best.title.replace(/\s+of\s+.*$/i, "").trim() || capitalizeWords(office);
       return {
         query,
         heading: best.title,
         abstract: null,
-        answer: `The current ${officeDisplay} of ${displayPlace(parsed.place)} is ${incumbent} (per Wikipedia).`,
+        answer: `The current ${officeDisplay} of ${displayPlace(place)} is ${incumbent} (per Wikipedia).`,
         source: "Wikipedia",
         url: topics[0]?.url ?? null,
         topics,
@@ -869,29 +1025,29 @@ async function searchKnowledgeFallback(
   let abstractTitle = best.title;
   let lead = await fetchWikipediaLead(best.title, timeoutMs, signal).catch(() => null);
 
-  // Rank-qualified officeholder questions ("who was the FIRST x of y?") must
-  // never be answered from a page that doesn't even mention the office — e.g.
-  // a Sikh-demographics article for "…prime minister of India". Walk the
-  // ranked list for the first article whose lead names the office; if none
-  // does, return null so the caller defers to the reasoning model.
-  if (RANK_QUALIFIED_OFFICE.test(query)) {
-    const rankNoun = officeNounOf(query);
-    if (rankNoun) {
-      const mentionsOffice = (text: string | null) =>
-        Boolean(text && text.toLowerCase().includes(rankNoun));
-      if (!mentionsOffice(lead)) {
-        lead = null;
-        for (const hit of ranked.slice(1)) {
-          const altLead = await fetchWikipediaLead(hit.title, timeoutMs, signal).catch(() => null);
-          if (mentionsOffice(altLead)) {
-            lead = altLead;
-            abstractTitle = hit.title;
-            break;
-          }
+  // Rank-qualified officeholder questions ("who was the FIRST x of y?", "x ka
+  // pehla … kaun tha?") must never be answered from a page that doesn't
+  // semantically support the requested relationship — the office, the place,
+  // the rank AND the content qualifiers ("first Sikh prime minister of India").
+  // A page that only shares the office noun ("…Prime Minister of Punjab") is
+  // not the answer. Walk the ranked list for the first article whose lead
+  // supports all of it; if none does, return null so the caller defers rather
+  // than guessing.
+  if (cls.kind === "rank-qualified") {
+    const supports = (text: string | null) =>
+      Boolean(text && contentSupportsRankQualified(text.toLowerCase(), cls));
+    if (!supports(lead)) {
+      lead = null;
+      for (const hit of ranked.slice(1)) {
+        const altLead = await fetchWikipediaLead(hit.title, timeoutMs, signal).catch(() => null);
+        if (supports(altLead)) {
+          lead = altLead;
+          abstractTitle = hit.title;
+          break;
         }
       }
-      if (!lead) return null;
     }
+    if (!lead) return null;
   }
   const snippet = cleanHtmlText(best.snippet ?? "");
   if (!lead && snippet && JUNK_SNIPPET_RE.test(snippet)) {
@@ -948,7 +1104,7 @@ export async function webSearch(
   // them; every other query (generic and rank-qualified) keeps the concurrent
   // race below.
   if (cls.kind === "officeholder" || cls.kind === "capital") {
-    result = await searchKnowledgeFallback(query, timeoutMs, signal).catch(() => null);
+    result = await searchKnowledgeFallback(query, cls, timeoutMs, signal).catch(() => null);
   } else {
     // The Wikipedia fallback is independent of DuckDuckGo, and most factual
     // questions get no instant answer — start it concurrently so the fallback's
@@ -957,7 +1113,7 @@ export async function webSearch(
     const fallbackController = new AbortController();
     const onOuterAbort = () => fallbackController.abort();
     signal?.addEventListener("abort", onOuterAbort, { once: true });
-    const fallbackPromise = searchKnowledgeFallback(query, timeoutMs, fallbackController.signal)
+    const fallbackPromise = searchKnowledgeFallback(query, cls, timeoutMs, fallbackController.signal)
       .catch(() => null);
 
     try {
@@ -1003,10 +1159,11 @@ export async function webSearch(
     }
 
     // DuckDuckGo only wins when it actually answers THIS query: a
-    // rank-qualified question needs content naming office + place + rank, and
-    // a generic result needs real content, not a bare heading with title-only
-    // topics. Otherwise the Wikipedia fallback continues.
-    if (result && !isEmpty(result) && isSearchResultRelevant(result, cls)) {
+    // rank-qualified question needs content naming office + place + rank +
+    // qualifier, and a generic result needs real content that names the
+    // question's subject — never a keyword-only abstract or a bare heading
+    // with title-only topics. Otherwise the Wikipedia fallback continues.
+    if (result && !isEmpty(result) && isSearchResultRelevant(result, cls, query)) {
       // The instant answer is relevant — cancel the concurrent fallback.
       fallbackController.abort();
     } else {
@@ -1018,10 +1175,11 @@ export async function webSearch(
   }
   if (isEmpty(result)) return null;
   if (!result) return null;
-  // Rank-qualified results must name the office in the content we serve — an
-  // unrelated page is worse than no result. The fallback already enforces this
-  // internally; the gate here also guards the DuckDuckGo winner.
-  if (cls.kind === "rank-qualified" && cls.officeNoun && !searchResultContent(result).includes(cls.officeNoun)) {
+  // Rank-qualified results must semantically support the requested
+  // relationship (rank + qualifier(s) + office + place) — an unrelated page is
+  // worse than no result. The fallback already enforces this internally; the
+  // gate here also guards the DuckDuckGo winner.
+  if (cls.kind === "rank-qualified" && !contentSupportsRankQualified(searchResultContent(result), cls)) {
     return null;
   }
   searchCache.set(key, { value: result, at: Date.now() });
@@ -1058,34 +1216,91 @@ function isContentfulResult(result: SearchResult): boolean {
   return result.topics.some((t) => isContentfulTopicText(t.text ?? ""));
 }
 
+/** Whether a whole word appears in lowercase content (word-boundary match). */
+function contentHasWord(content: string, word: string): boolean {
+  const w = word.toLowerCase();
+  if (w.length < 3) return content.includes(w);
+  return new RegExp(`\\b${escapeRegExp(w)}\\b`).test(content);
+}
+
 /** Whether the place appears in the content, matching its canonical alias too. */
 function contentMentionsPlace(content: string, place: string, canonical: string | null): boolean {
   const raw = place.toLowerCase().replace(/^the\s+/, "").trim();
-  if (raw.length >= 3 && content.includes(raw)) return true;
-  if (canonical && content.includes(canonical.toLowerCase())) return true;
+  if (raw.length >= 3 && contentHasWord(content, raw)) return true;
+  if (canonical && contentHasWord(content, canonical)) return true;
   return false;
+}
+
+/**
+ * Semantic support check for rank-qualified questions. The content must
+ * establish the requested relationship: the office, the place, the rank AND
+ * the content qualifiers ("first Sikh prime minister of India"). A result that
+ * only shares the office noun ("…was Prime Minister of Punjab") cannot support
+ * "…first Sikh Prime Minister of India" and is rejected — never guessed at.
+ */
+function contentSupportsRankQualified(
+  content: string,
+  rq: {
+    rank?: string;
+    officeNoun?: string;
+    qualifiers?: string[];
+    place?: string;
+    canonicalPlace?: string | null;
+  }
+): boolean {
+  if (rq.officeNoun && !contentHasWord(content, rq.officeNoun)) return false;
+  if (rq.place && !contentMentionsPlace(content, rq.place, rq.canonicalPlace ?? null)) return false;
+  if (rq.rank && !contentHasWord(content, rq.rank)) return false;
+  if (
+    rq.qualifiers &&
+    rq.qualifiers.length > 0 &&
+    !rq.qualifiers.every((q) => contentHasWord(content, q))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** Hinglish interrogative particles — never content, never a search subject. */
+const HINGLISH_PARTICLES = new Set([
+  "kya", "hai", "tha", "thi", "hain", "the", "hota", "hoti", "kaun", "kis",
+  "konsa", "kiska", "kiski", "ho", "hue", "hoga",
+]);
+
+/**
+ * Whether a generic DuckDuckGo result actually addresses the question's
+ * subject. "What is a JavaScript closure?" is about "closure" — a result that
+ * only talks about "JavaScript is a programming language…" shares a keyword
+ * but not the subject and must not win the race over the Wikipedia fallback.
+ * The subject is the trailing content keyword (the head noun); a query with no
+ * usable subject accepts any contentful result.
+ */
+function genericResultMatchesTopic(result: SearchResult, query: string): boolean {
+  const keywords = queryKeywords(query);
+  if (keywords.length === 0) return true;
+  let head = keywords[keywords.length - 1];
+  while (keywords.length > 1 && HINGLISH_PARTICLES.has(head)) {
+    keywords.pop();
+    head = keywords[keywords.length - 1];
+  }
+  if (!head || head.length < 3) return true;
+  return contentHasWord(searchResultContent(result), head);
 }
 
 /**
  * Query-aware relevance gate: DuckDuckGo only wins the race when its content
  * actually answers the question asked. A rank-qualified question needs the
- * office, the place and the rank to all appear; a generic result only needs
- * to be real content rather than a heading with title-only topics.
+ * office, the place, the rank and the qualifiers to all appear; a generic
+ * result needs real content that names the question's subject — never a
+ * keyword-only abstract ("JavaScript is a programming language…" for a
+ * "closure" question) or a heading with title-only topics.
  */
-function isSearchResultRelevant(result: SearchResult, cls: KnowledgeQuery): boolean {
+function isSearchResultRelevant(result: SearchResult, cls: KnowledgeQuery, query: string): boolean {
   if (cls.kind === "rank-qualified") {
-    const content = searchResultContent(result);
-    if (cls.officeNoun && !content.includes(cls.officeNoun)) return false;
-    if (cls.place && !contentMentionsPlace(content, cls.place, cls.canonicalPlace ?? null)) return false;
-    if (cls.rank && !content.includes(cls.rank.toLowerCase())) return false;
-    if (
-      cls.qualifiers &&
-      cls.qualifiers.length > 0 &&
-      !cls.qualifiers.some((q) => content.includes(q))
-    ) {
-      return false;
-    }
-    return true;
+    return contentSupportsRankQualified(searchResultContent(result), cls);
+  }
+  if (cls.kind === "generic") {
+    return isContentfulResult(result) && genericResultMatchesTopic(result, query);
   }
   return isContentfulResult(result);
 }
