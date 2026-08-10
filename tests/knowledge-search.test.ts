@@ -374,4 +374,98 @@ describe("webSearch Wikipedia fallback (mocked)", () => {
     expect(result?.abstract).toContain("closure");
     expect(result?.abstract).not.toContain("JavaScript (JS) is a programming language");
   });
+
+  it("answers a capital question from the PLACE's article, not 'Capital punishment in <place>'", async () => {
+    // The word "capital" matches "Capital punishment in India" — the old keyword
+    // ranking surfaced it as the answer. The place's own article must win and
+    // its infobox `capital` field supplies the answer.
+    SEARCH_RESPONSES.set(
+      "search:what is the capital of india",
+      searchResult(["Capital punishment in India", "India", "List of capitals of India"])
+    );
+    SEARCH_RESPONSES.set(
+      "wt:India",
+      "{{Infobox country\n| capital = [[New Delhi]]\n| largest_city = Mumbai\n}}"
+    );
+    const result = await webSearch("what is the capital of india");
+    expect(result?.heading).toBe("India");
+    expect(result?.answer).toContain("New Delhi");
+    expect(result?.answer).not.toContain("punishment");
+  });
+
+  it("searches for the place itself when no ranked hit carries a capital infobox", async () => {
+    // None of the original hits is the place article — the curated place-only
+    // search must surface "India" so the infobox `capital` field can be read.
+    SEARCH_RESPONSES.set(
+      "search:what is the capital of india",
+      searchResult(["Capital punishment in India", "List of capital cities"])
+    );
+    SEARCH_RESPONSES.set("search:india", searchResult(["India"]));
+    SEARCH_RESPONSES.set(
+      "wt:India",
+      "{{Infobox country\n| capital = [[New Delhi]]\n| largest_city = Mumbai\n}}"
+    );
+    const result = await webSearch("what is the capital of india");
+    expect(result?.heading).toBe("India");
+    expect(result?.answer).toContain("New Delhi");
+  });
+
+  it("never pastes a bibliographic search fragment (ISBN) as the answer — falls back to the next article's lead", async () => {
+    // The top hit's lead is unavailable and its snippet is an ISBN reference.
+    // Pasting it would be the "search result became the answer" regression —
+    // move to the next ranked article's clean lead instead.
+    SEARCH_RESPONSES.set("search:who invented the telephone", {
+      query: {
+        search: [
+          { title: "Telephone", snippet: "Telephone — ISBN 978-0-8108-2898-8. Beauchamp, Christopher (2010).", pageid: 1 },
+          { title: "Invention of the telephone", snippet: "The invention of the telephone involved many inventors.", pageid: 2 },
+        ],
+      },
+    });
+    SEARCH_RESPONSES.set("lead:Telephone", null);
+    SEARCH_RESPONSES.set(
+      "lead:Invention of the telephone",
+      "The invention of the telephone is credited to Alexander Graham Bell, who patented the first practical telephone in 1876."
+    );
+    const result = await webSearch("who invented the telephone");
+    expect(result?.heading).toBe("Invention of the telephone");
+    expect(result?.abstract).toContain("Bell");
+    expect(result?.abstract).not.toContain("ISBN");
+  });
+
+  it("keeps acronym places readable in answers ('the usa', never 'The Usa')", async () => {
+    SEARCH_RESPONSES.set(
+      "search:who is the current president of the usa",
+      searchResult(["President of the United States", "List of presidents of the United States"])
+    );
+    SEARCH_RESPONSES.set(
+      "wt:President of the United States",
+      "{{Infobox officeholder\n| office = President of the United States\n| incumbent = [[Donald Trump]]\n}}"
+    );
+    const result = await webSearch("who is the current president of the usa");
+    expect(result?.answer).toContain("of the USA");
+    expect(result?.answer).not.toContain("The Usa");
+  });
+
+  it("walks the ranked list for the office-mentioning lead on rank-qualified questions", async () => {
+    // "who was the FIRST sikh prime minister of india" must never be answered
+    // from a Sikh-demographics article whose lead never mentions the office —
+    // even when that demographics page ranks above the biography. The generic
+    // branch must skip it and take the first lead that names the office.
+    SEARCH_RESPONSES.set(
+      "search:who is the first sikh prime minister of india",
+      searchResult(["Sikhism in India", "Manmohan Singh"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Sikhism in India",
+      "Indian Sikhs number approximately 21 million people and account for 1.7% of India's population as of 2011."
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Manmohan Singh",
+      "Manmohan Singh was the 13th prime minister of India and the first Sikh to hold the office."
+    );
+    const result = await webSearch("who is the first sikh prime minister of india");
+    expect(result?.heading).toBe("Manmohan Singh");
+    expect(result?.abstract).toContain("prime minister");
+  });
 });

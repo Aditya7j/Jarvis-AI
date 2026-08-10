@@ -167,6 +167,11 @@ export interface SearchResult {
 
 const searchCache = new Map<string, CacheEntry<SearchResult>>();
 
+/** Clear the web-search result cache (tests and cache-busting flows). */
+export function invalidateSearchCache(): void {
+  searchCache.clear();
+}
+
 /** Strip HTML tags and entities from a Wikipedia snippet fragment. */
 function cleanHtmlText(raw: string): string {
   return raw
@@ -179,6 +184,23 @@ function cleanHtmlText(raw: string): string {
     .replace(/&nbsp;/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** Search fragments that are bibliographic/reference noise, never an answer. */
+const JUNK_SNIPPET_RE =
+  /\b(?:isbn|issn|doi\s*:|oclc\s*\d+|cite\s+(?:book|journal|web|news|magazine))\b/i;
+
+/**
+ * Whether a topic entry carries a real answer rather than a bare heading.
+ * DuckDuckGo's RelatedTopics entries are "Title — Description" pairs; a topic
+ * that is just a title ("Event loop", "Closure") is a heading, never an
+ * answer. A long-enough passage is content even without the separator.
+ */
+export function isContentfulTopicText(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (/[—–]/.test(t) || /\s-\s/.test(t)) return true;
+  return t.length >= 40;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +275,33 @@ export function properNounsOf(query: string): string[] {
   return words.filter((w) => w !== first).map((w) => w.toLowerCase());
 }
 
+/** Unambiguous place aliases normalized to their Wikipedia article title. */
+const PLACE_ALIASES: Record<string, string> = {
+  usa: "United States",
+  us: "United States",
+  "u.s.": "United States",
+  america: "United States",
+  "united states of america": "United States",
+  uk: "United Kingdom",
+  "u.k.": "United Kingdom",
+  britain: "United Kingdom",
+  "great britain": "United Kingdom",
+  uae: "United Arab Emirates",
+  "u.a.e.": "United Arab Emirates",
+};
+
+/**
+ * The canonical Wikipedia article title for a place, so "what is the capital
+ * of usa" reads the "United States" article (whose infobox carries the
+ * `capital` field) instead of failing on the alias "usa". Returns null when
+ * the place needs no normalization.
+ */
+export function canonicalPlaceOf(place: string): string | null {
+  const key = place.toLowerCase().trim().replace(/^the\s+/, "").trim();
+  if (!key) return null;
+  return PLACE_ALIASES[key] ?? null;
+}
+
 /**
  * Rank-qualified officeholder questions ("who is/was the FIRST Sikh prime
  * minister of India?"). These can never be answered by the current-incumbent
@@ -270,6 +319,98 @@ export function officeNounOf(q: string): string | null {
   if (!m) return null;
   const words = m[1].trim().split(/\s+/).filter((w) => w.length >= 3);
   return words[words.length - 1] ?? null;
+}
+
+export interface RankQualifiedOffice {
+  rank: string;
+  office: string;
+  officeNoun: string;
+  qualifiers: string[];
+  place: string;
+  canonicalPlace: string | null;
+}
+
+/**
+ * Parse a rank-qualified officeholder question into its parts: rank
+ * ("first"), office phrase ("sikh prime minister"), core office noun
+ * ("minister"), content qualifiers ("sikh", "prime") and place ("india").
+ * Returns null for anything that is not such a question.
+ */
+export function parseRankQualifiedOffice(q: string): RankQualifiedOffice | null {
+  const m = q
+    .toLowerCase()
+    .trim()
+    .match(
+      /\bwho\s+(?:is|was)\s+(?:the\s+)?(first|last|previous|former|next|oldest|youngest|earliest|latest|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(.+?)\s+of\s+(.+?)\s*[?.!]?\s*$/
+    );
+  if (!m) return null;
+  const rank = m[1];
+  const office = m[2].trim();
+  const place = m[3].trim();
+  if (office.length < 3 || place.length < 2) return null;
+  if (/\b(?:you|this|that|it|there)\b/.test(place)) return null;
+  const words = office.split(/\s+/).filter((w) => w.length >= 3 && !SEARCH_STOPWORDS.has(w));
+  const officeNoun = words[words.length - 1] ?? "";
+  return {
+    rank,
+    office,
+    officeNoun,
+    qualifiers: words.slice(0, -1),
+    place,
+    canonicalPlace: canonicalPlaceOf(place),
+  };
+}
+
+export type KnowledgeQueryKind = "officeholder" | "rank-qualified" | "capital" | "generic";
+
+export interface KnowledgeQuery {
+  kind: KnowledgeQueryKind;
+  office?: string;
+  officeNoun?: string;
+  qualifiers?: string[];
+  place?: string;
+  canonicalPlace?: string | null;
+  rank?: string;
+}
+
+/**
+ * Classify a knowledge query so webSearch picks the right strategy.
+ * Officeholder and capital questions are answered authoritatively from the
+ * article's infobox (DuckDuckGo is skipped entirely); rank-qualified and
+ * generic questions race DuckDuckGo but only accept it when the content is
+ * genuinely relevant to THIS query.
+ */
+export function classifyKnowledgeQuery(q: string): KnowledgeQuery {
+  const rank = parseRankQualifiedOffice(q);
+  if (rank) {
+    return {
+      kind: "rank-qualified",
+      office: rank.office,
+      officeNoun: rank.officeNoun,
+      qualifiers: rank.qualifiers,
+      place: rank.place,
+      canonicalPlace: rank.canonicalPlace,
+      rank: rank.rank,
+    };
+  }
+  const office = parseOfficeQuestion(q);
+  if (office) {
+    return {
+      kind: "officeholder",
+      office: office.office,
+      place: office.place,
+      canonicalPlace: canonicalPlaceOf(office.place),
+    };
+  }
+  const capital = parseCapitalQuestion(q);
+  if (capital) {
+    return {
+      kind: "capital",
+      place: capital.place,
+      canonicalPlace: canonicalPlaceOf(capital.place),
+    };
+  }
+  return { kind: "generic" };
 }
 
 /**
@@ -312,7 +453,8 @@ function canonicalCover(
     .split(/[^a-z]+/)
     .filter((w) => w.length >= 3 && !SEARCH_STOPWORDS.has(w));
   const target = [...officeTokens];
-  if (place) target.push(...place.split(/\s+/).filter((t) => t.length >= 3));
+  if (place)
+    target.push(...place.split(/\s+/).filter((t) => t.length >= 3 && !SEARCH_STOPWORDS.has(t)));
   if (target.length === 0) return { covered: false, extraWords: 0 };
   const used = new Array<boolean>(words.length).fill(false);
   for (const token of target) {
@@ -351,6 +493,42 @@ function scoreOfficeHit(title: string, office: string, place: string): number {
   if (/\b(?:disambiguation|index of|timeline of)\b/.test(lower)) score -= 12;
   score -= lower.length / 100;
   return score;
+}
+
+/**
+ * Rank capital-question hits. "What is the capital of X?" is about the PLACE,
+ * not the word "capital" — a keyword score matches "Capital punishment in
+ * India" over the country itself. Anchoring on the place surfaces the article
+ * that carries the `capital` infobox.
+ */
+function scoreCapitalHit(title: string, place: string): number {
+  const lower = title.toLowerCase();
+  let score = 0;
+  const cover = canonicalCover(lower, [], place);
+  if (cover.covered) score += 40 - 10 * cover.extraWords;
+  const placeTokens = place.split(/\s+/).filter((t) => t.length >= 3 && !SEARCH_STOPWORDS.has(t));
+  if (placeTokens.some((t) => lower.startsWith(t))) score += 6;
+  if (place && new RegExp(`\\bof\\s+${escapeRegExp(place)}\\b`).test(lower)) score += 3;
+  if (/^list of\b/.test(lower)) score -= 15;
+  if (/\b(?:disambiguation|index of)\b/.test(lower)) score -= 12;
+  score -= lower.length / 100;
+  return score;
+}
+
+/** Title-case a place for display, keeping articles lowercase and acronyms uppercase. */
+function displayPlace(place: string): string {
+  const minor = new Set(["the", "of", "and", "in", "on", "at", "a", "an"]);
+  const acronyms = new Set(["usa", "us", "uk", "uae", "eu", "un", "u.s."]);
+  return place
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => {
+      const lower = word.toLowerCase();
+      if (acronyms.has(lower)) return lower.toUpperCase();
+      if (minor.has(lower)) return lower;
+      return lower[0].toUpperCase() + lower.slice(1);
+    })
+    .join(" ");
 }
 
 function scoreTitle(title: string, keywords: string[], anchors: string[], properNouns: string[]): number {
@@ -574,6 +752,7 @@ async function searchKnowledgeFallback(
 
   const parsed = parseOfficeQuestion(query);
   const officeLabel = officeLabelOf(query);
+  const capitalQuestion = parseCapitalQuestion(query);
   const keywords = queryKeywords(query);
   const anchors = anchorOf(query) ? [anchorOf(query)!] : [];
   const nouns = properNounsOf(query);
@@ -585,13 +764,21 @@ async function searchKnowledgeFallback(
       const place = parsed?.place ?? "";
       return scoreOfficeHit(b.title, office, place) - scoreOfficeHit(a.title, office, place);
     }
+    if (capitalQuestion) {
+      return (
+        scoreCapitalHit(b.title, capitalQuestion.place) -
+        scoreCapitalHit(a.title, capitalQuestion.place)
+      );
+    }
     return scoreTitle(b.title, keywords, anchors, nouns) - scoreTitle(a.title, keywords, anchors, nouns);
   });
 
   const topics: SearchResult["topics"] = [];
   for (const hit of ranked) {
+    const text = cleanHtmlText(hit.snippet ?? "").slice(0, 200) || hit.title;
+    if (JUNK_SNIPPET_RE.test(text)) continue;
     topics.push({
-      text: cleanHtmlText(hit.snippet ?? "").slice(0, 200) || hit.title,
+      text,
       url: hit.pageid
         ? `https://en.wikipedia.org/?curid=${hit.pageid}`
         : `https://en.wikipedia.org/wiki/${encodeURIComponent(hit.title.replace(/ /g, "_"))}`,
@@ -614,7 +801,7 @@ async function searchKnowledgeFallback(
         query,
         heading: best.title,
         abstract: null,
-        answer: `The current ${officeDisplay} of ${capitalizeWords(parsed.place)} is ${incumbent} (per Wikipedia).`,
+        answer: `The current ${officeDisplay} of ${displayPlace(parsed.place)} is ${incumbent} (per Wikipedia).`,
         source: "Wikipedia",
         url: topics[0]?.url ?? null,
         topics,
@@ -623,38 +810,107 @@ async function searchKnowledgeFallback(
     }
   }
 
-  // Capital questions: read the infobox `capital` field directly, so
-  // "what is the capital of france" answers with the city, not a truncated lead.
-  const capitalQuestion = parseCapitalQuestion(query);
+  // Capital questions: rank the place's own article first and read its infobox
+  // `capital` field directly, so "what is the capital of india" answers "New
+  // Delhi" instead of matching the keyword "capital" to "Capital punishment in
+  // India". If none of the ranked hits carries a `capital` infobox, search for
+  // the place itself — its own article is what carries it.
   if (capitalQuestion) {
-    const wikitext = await fetchWikipediaWikitext(best.title, timeoutMs, signal).catch(() => null);
-    const capital = wikitext ? extractCapitalName(wikitext) : null;
-    if (capital) {
+    // Normalize aliases ("usa" → "United States") so the place's own article —
+    // the one carrying the `capital` infobox — is searched and scored under its
+    // real name, and the answer displays the real name, never the alias.
+    const place = canonicalPlaceOf(capitalQuestion.place) ?? capitalQuestion.place;
+    const sorted = [...ranked].sort(
+      (a, b) => scoreCapitalHit(b.title, place) - scoreCapitalHit(a.title, place)
+    );
+    const tryCapital = async (
+      hits: Array<{ title: string }>
+    ): Promise<{ title: string; capital: string } | null> => {
+      for (const hit of hits) {
+        const wikitext = await fetchWikipediaWikitext(hit.title, timeoutMs, signal).catch(() => null);
+        const capital = wikitext ? extractCapitalName(wikitext) : null;
+        if (capital) return { title: hit.title, capital };
+      }
+      return null;
+    };
+    let candidates = [...sorted];
+    let found = await tryCapital(candidates.slice(0, 4));
+    if (!found) {
+      const originalCount = candidates.length;
+      const placeHits = await searchWikipedia(place, timeoutMs, signal).catch(() => []);
+      for (const h of placeHits) {
+        if (!candidates.some((c) => c.title === h.title)) candidates.push(h);
+      }
+      found = await tryCapital(candidates.slice(originalCount));
+    }
+    if (found) {
+      const placeDisplay =
+        place.toLowerCase() === "united states" || place.toLowerCase() === "united kingdom"
+          ? `the ${place}`
+          : displayPlace(place);
       return {
         query,
-        heading: best.title,
+        heading: found.title,
         abstract: null,
-        answer: `The capital of ${capitalizeWords(capitalQuestion.place)} is ${capital} (per Wikipedia).`,
+        answer: `The capital of ${placeDisplay} is ${found.capital} (per Wikipedia).`,
         source: "Wikipedia",
-        url: topics[0]?.url ?? null,
+        url: `https://en.wikipedia.org/wiki/${encodeURIComponent(found.title.replace(/ /g, "_"))}`,
         topics,
         engine: "Wikipedia",
       };
     }
+    // No article yielded a `capital` infobox — fall through to the lead path.
   }
 
   // Generic questions: fetch the FULL lead of the best article — a real
-  // paragraph, not a 200-char search fragment from an unrelated page.
-  const lead = await fetchWikipediaLead(best.title, timeoutMs, signal).catch(() => null);
+  // paragraph, not a 200-char search fragment from an unrelated page. When the
+  // lead is unavailable and the fragment is bibliographic noise ("ISBN …"),
+  // never paste it as an answer — move to the next ranked article's lead.
+  let abstractTitle = best.title;
+  let lead = await fetchWikipediaLead(best.title, timeoutMs, signal).catch(() => null);
+
+  // Rank-qualified officeholder questions ("who was the FIRST x of y?") must
+  // never be answered from a page that doesn't even mention the office — e.g.
+  // a Sikh-demographics article for "…prime minister of India". Walk the
+  // ranked list for the first article whose lead names the office; if none
+  // does, return null so the caller defers to the reasoning model.
+  if (RANK_QUALIFIED_OFFICE.test(query)) {
+    const rankNoun = officeNounOf(query);
+    if (rankNoun) {
+      const mentionsOffice = (text: string | null) =>
+        Boolean(text && text.toLowerCase().includes(rankNoun));
+      if (!mentionsOffice(lead)) {
+        lead = null;
+        for (const hit of ranked.slice(1)) {
+          const altLead = await fetchWikipediaLead(hit.title, timeoutMs, signal).catch(() => null);
+          if (mentionsOffice(altLead)) {
+            lead = altLead;
+            abstractTitle = hit.title;
+            break;
+          }
+        }
+      }
+      if (!lead) return null;
+    }
+  }
   const snippet = cleanHtmlText(best.snippet ?? "");
-  const abstract =
-    lead || snippet
-      ? `${best.title} — ${(lead ?? snippet).slice(0, 600)}`
-      : null;
+  if (!lead && snippet && JUNK_SNIPPET_RE.test(snippet)) {
+    for (const hit of ranked.slice(1, 4)) {
+      const altLead = await fetchWikipediaLead(hit.title, timeoutMs, signal).catch(() => null);
+      if (altLead && !JUNK_SNIPPET_RE.test(altLead)) {
+        lead = altLead;
+        abstractTitle = hit.title;
+        break;
+      }
+    }
+  }
+  const cleanSnippet = snippet && !JUNK_SNIPPET_RE.test(snippet) ? snippet : "";
+  const body = lead || cleanSnippet;
+  const abstract = body ? `${abstractTitle} — ${body.slice(0, 600)}` : null;
   if (!abstract && topics.length === 0) return null;
   return {
     query,
-    heading: best.title,
+    heading: abstractTitle,
     abstract,
     answer: null,
     source: "Wikipedia",
@@ -676,84 +932,97 @@ export async function webSearch(
   if (hit) return hit;
   const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1&t=jarvis`;
 
-  // The Wikipedia fallback is independent of DuckDuckGo, and most factual
-  // questions get no instant answer — start it concurrently so the fallback's
-  // round-trips don't stack behind DuckDuckGo's. If DuckDuckGo answers, the
-  // fallback is aborted and the instant answer is served immediately.
-  const fallbackController = new AbortController();
-  const onOuterAbort = () => fallbackController.abort();
-  signal?.addEventListener("abort", onOuterAbort, { once: true });
-  const fallbackPromise = searchKnowledgeFallback(query, timeoutMs, fallbackController.signal)
-    .catch(() => null);
+  const isEmpty = (r: SearchResult | null): boolean =>
+    !r || (!r.abstract && !r.answer && r.topics.length === 0);
+
+  const cls = classifyKnowledgeQuery(query);
 
   let result: SearchResult | null = null;
   let ddgError: unknown = null;
-  try {
-    const res = await fetchWithTimeout(url, timeoutMs, signal);
-    if (!res.ok) throw new ToolkitNetworkError(`Search service responded with ${res.status}.`);
-    let data: {
-      AbstractText?: string;
-      AbstractURL?: string;
-      Heading?: string;
-      Answer?: string;
-      AbstractSource?: string;
-      RelatedTopics?: Array<{ Text?: string; FirstURL?: string; Topics?: Array<{ Text?: string; FirstURL?: string }> }>;
-    } | null = null;
+
+  // Officeholder/capital questions are answered authoritatively from the
+  // article's infobox ("The current Prime Minister of Canada is …"). A
+  // DuckDuckGo abstract for those is a definition, not the name ("The prime
+  // minister of Canada is the head of government…"), and letting it win the
+  // race would abort the infobox answer. Run the Wikipedia fallback alone for
+  // them; every other query (generic and rank-qualified) keeps the concurrent
+  // race below.
+  if (cls.kind === "officeholder" || cls.kind === "capital") {
+    result = await searchKnowledgeFallback(query, timeoutMs, signal).catch(() => null);
+  } else {
+    // The Wikipedia fallback is independent of DuckDuckGo, and most factual
+    // questions get no instant answer — start it concurrently so the fallback's
+    // round-trips don't stack behind DuckDuckGo's. If DuckDuckGo answers, the
+    // fallback is aborted and the instant answer is served immediately.
+    const fallbackController = new AbortController();
+    const onOuterAbort = () => fallbackController.abort();
+    signal?.addEventListener("abort", onOuterAbort, { once: true });
+    const fallbackPromise = searchKnowledgeFallback(query, timeoutMs, fallbackController.signal)
+      .catch(() => null);
+
     try {
-      data = (await res.json()) as {
+      const res = await fetchWithTimeout(url, timeoutMs, signal);
+      if (!res.ok) throw new ToolkitNetworkError(`Search service responded with ${res.status}.`);
+      let data: {
         AbstractText?: string;
         AbstractURL?: string;
         Heading?: string;
         Answer?: string;
         AbstractSource?: string;
         RelatedTopics?: Array<{ Text?: string; FirstURL?: string; Topics?: Array<{ Text?: string; FirstURL?: string }> }>;
+      } | null = null;
+      try {
+        data = (await res.json()) as {
+          AbstractText?: string;
+          AbstractURL?: string;
+          Heading?: string;
+          Answer?: string;
+          AbstractSource?: string;
+          RelatedTopics?: Array<{ Text?: string; FirstURL?: string; Topics?: Array<{ Text?: string; FirstURL?: string }> }>;
+        };
+      } catch {
+        // DuckDuckGo intermittently returns a truncated/empty body that cannot be
+        // parsed as JSON. Treat it as "no instant answer" and fall through to the
+        // Wikipedia fallback instead of surfacing a SyntaxError to the caller.
+        data = null;
+      }
+      result = {
+        query,
+        heading: data?.Heading || null,
+        abstract: data?.AbstractText || null,
+        answer: data?.Answer || null,
+        source: data?.AbstractSource || null,
+        url: data?.AbstractURL || null,
+        topics: buildTopics(data?.RelatedTopics ?? []),
+        engine: "DuckDuckGo",
       };
-    } catch {
-      // DuckDuckGo intermittently returns a truncated/empty body that cannot be
-      // parsed as JSON. Treat it as "no instant answer" and fall through to the
-      // Wikipedia fallback instead of surfacing a SyntaxError to the caller.
-      data = null;
+    } catch (err) {
+      ddgError = err;
+    } finally {
+      signal?.removeEventListener("abort", onOuterAbort);
     }
-    result = {
-      query,
-      heading: data?.Heading || null,
-      abstract: data?.AbstractText || null,
-      answer: data?.Answer || null,
-      source: data?.AbstractSource || null,
-      url: data?.AbstractURL || null,
-      topics: buildTopics(data?.RelatedTopics ?? []),
-      engine: "DuckDuckGo",
-    };
-  } catch (err) {
-    ddgError = err;
-  } finally {
-    signal?.removeEventListener("abort", onOuterAbort);
-  }
 
-  const isEmpty = (r: SearchResult | null): boolean =>
-    !r || (!r.abstract && !r.answer && r.topics.length === 0);
-
-  if (!isEmpty(result)) {
-    // The instant answer is authoritative — cancel the concurrent fallback.
-    fallbackController.abort();
-  } else {
-    const fallback = await fallbackPromise;
-    if (fallback) result = fallback;
-    else if (ddgError) throw ddgError;
+    // DuckDuckGo only wins when it actually answers THIS query: a
+    // rank-qualified question needs content naming office + place + rank, and
+    // a generic result needs real content, not a bare heading with title-only
+    // topics. Otherwise the Wikipedia fallback continues.
+    if (result && !isEmpty(result) && isSearchResultRelevant(result, cls)) {
+      // The instant answer is relevant — cancel the concurrent fallback.
+      fallbackController.abort();
+    } else {
+      const fallback = await fallbackPromise;
+      if (fallback) result = fallback;
+      else if (ddgError) throw ddgError;
+      else result = null;
+    }
   }
   if (isEmpty(result)) return null;
   if (!result) return null;
-  // Rank-qualified officeholder relevance gate: a "who is the first X of Y?"
-  // question is only answered when the result actually mentions the office
-  // ("...prime minister..."). An unrelated page (e.g. a demographics article
-  // about a community) is worse than no result — return null so the caller
-  // defers to the reasoning model instead of pasting irrelevant text.
-  const rankNoun = officeNounOf(query);
-  if (rankNoun) {
-    const content = `${result.abstract ?? ""} ${result.answer ?? ""} ${result.topics
-      .map((t) => t.text)
-      .join(" ")}`.toLowerCase();
-    if (!content.includes(rankNoun)) return null;
+  // Rank-qualified results must name the office in the content we serve — an
+  // unrelated page is worse than no result. The fallback already enforces this
+  // internally; the gate here also guards the DuckDuckGo winner.
+  if (cls.kind === "rank-qualified" && cls.officeNoun && !searchResultContent(result).includes(cls.officeNoun)) {
+    return null;
   }
   searchCache.set(key, { value: result, at: Date.now() });
   return result;
@@ -774,6 +1043,51 @@ function buildTopics(
     }
   }
   return topics;
+}
+
+/** Flatten a result's text fields into one lowercase searchable string. */
+function searchResultContent(result: SearchResult): string {
+  return `${result.heading ?? ""} ${result.abstract ?? ""} ${result.answer ?? ""} ${result.topics
+    .map((t) => t.text)
+    .join(" ")}`.toLowerCase();
+}
+
+/** Whether the result carries real content rather than a bare title/heading. */
+function isContentfulResult(result: SearchResult): boolean {
+  if (result.abstract?.trim() || result.answer?.trim()) return true;
+  return result.topics.some((t) => isContentfulTopicText(t.text ?? ""));
+}
+
+/** Whether the place appears in the content, matching its canonical alias too. */
+function contentMentionsPlace(content: string, place: string, canonical: string | null): boolean {
+  const raw = place.toLowerCase().replace(/^the\s+/, "").trim();
+  if (raw.length >= 3 && content.includes(raw)) return true;
+  if (canonical && content.includes(canonical.toLowerCase())) return true;
+  return false;
+}
+
+/**
+ * Query-aware relevance gate: DuckDuckGo only wins the race when its content
+ * actually answers the question asked. A rank-qualified question needs the
+ * office, the place and the rank to all appear; a generic result only needs
+ * to be real content rather than a heading with title-only topics.
+ */
+function isSearchResultRelevant(result: SearchResult, cls: KnowledgeQuery): boolean {
+  if (cls.kind === "rank-qualified") {
+    const content = searchResultContent(result);
+    if (cls.officeNoun && !content.includes(cls.officeNoun)) return false;
+    if (cls.place && !contentMentionsPlace(content, cls.place, cls.canonicalPlace ?? null)) return false;
+    if (cls.rank && !content.includes(cls.rank.toLowerCase())) return false;
+    if (
+      cls.qualifiers &&
+      cls.qualifiers.length > 0 &&
+      !cls.qualifiers.some((q) => content.includes(q))
+    ) {
+      return false;
+    }
+    return true;
+  }
+  return isContentfulResult(result);
 }
 
 export interface NewsItem {

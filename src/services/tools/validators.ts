@@ -9,6 +9,7 @@
  */
 
 import type { ToolValidation } from "./types";
+import { isContentfulTopicText } from "@/lib/toolkit/web";
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -277,10 +278,12 @@ export function validateWebSearch(data: unknown): ToolValidation {
   if (!isRecord(data)) return invalid("web_search: expected an object");
   if (!isNonEmptyString(data.query)) return invalid("web_search: missing query");
   const topics = Array.isArray(data.topics) ? data.topics : [];
+  // Topic text must be contentful — a bare heading ("Event loop") is not an
+  // answer. "Title — description" pairs (or a long-enough passage) are.
   const hasContent =
     isNonEmptyString(data.abstract) ||
     isNonEmptyString(data.answer) ||
-    topics.some((t) => isRecord(t) && isNonEmptyString(t.text));
+    topics.some((t) => isRecord(t) && typeof t.text === "string" && isContentfulTopicText(t.text));
   if (!hasContent) return invalid("web_search: empty result");
   return { valid: true };
 }

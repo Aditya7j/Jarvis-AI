@@ -119,8 +119,12 @@ describe("live-fact freshness", () => {
     if (first.ok && second.ok) {
       expect(first.meta.cacheHit).toBe(false);
       expect(second.meta.cacheHit).toBe(false);
-      expect((first.data as { unixMs: number }).unixMs).not.toBe(
-        (second.data as { unixMs: number }).unixMs
+      // Both reads are fresh and uncached. Two reads within the same wall-clock
+      // millisecond may legitimately be equal, so assert monotonicity instead
+      // of inequality — a stale cached read would come back EARLIER than the
+      // first reading and fail this check.
+      expect((second.data as { unixMs: number }).unixMs).toBeGreaterThanOrEqual(
+        (first.data as { unixMs: number }).unixMs
       );
       expect(Math.abs(Date.now() - (second.data as { unixMs: number }).unixMs)).toBeLessThan(1_000);
     }

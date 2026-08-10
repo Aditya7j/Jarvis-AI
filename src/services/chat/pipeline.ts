@@ -48,7 +48,7 @@ import { extractDateTokens } from "@/lib/time/date-calc";
 import type { VisionFrameInput } from "@/lib/vision/vision-manager";
 import type { AIMessageInput } from "@/lib/ai/types";
 import { parseConversionRequest } from "@/lib/toolkit/convert";
-import { enrichSearchQuery, normalizeCurrency, parseCurrencyRequest } from "@/lib/toolkit/web";
+import { enrichSearchQuery, isContentfulTopicText, normalizeCurrency, parseCurrencyRequest } from "@/lib/toolkit/web";
 import { getContextEngine } from "@/services/context/context-engine";
 import type { BatteryFact, WeatherFact } from "@/lib/ai/system-tools";
 import {
@@ -892,8 +892,9 @@ function formatSearchDirect(fact: unknown, language: SpokenLanguage): string {
   if (topics.length > 0) {
     // A single clean answer from the top topic beats a noisy bullet list of
     // loosely-related pages ("What is React?" → the React library, not three
-    // different React articles).
-    const top = topics[0];
+    // different React articles). A title-only topic ("Event loop", "Closure")
+    // is a heading, never an answer — skip it rather than echoing a bare title.
+    const top = topics.find((t): t is string => typeof t === "string" && isContentfulTopicText(t));
     if (top) return top;
   }
   return tr(

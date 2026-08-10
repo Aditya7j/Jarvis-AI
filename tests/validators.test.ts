@@ -264,8 +264,14 @@ describe("validateWebSearch", () => {
     valid(validateWebSearch({ query: "x", abstract: "real content" }));
   });
 
-  it("accepts a result with non-empty topic text", () => {
-    valid(validateWebSearch({ query: "x", topics: [{ text: "content" }] }));
+  it("accepts a result with contentful topic text", () => {
+    valid(validateWebSearch({ query: "x", topics: [{ text: "Event loop (JavaScript) — The mechanism that handles asynchronous operations." }] }));
+  });
+
+  it("rejects a result whose only topic is a bare title — a heading is not an answer", () => {
+    const v = validateWebSearch({ query: "x", topics: [{ text: "Event loop" }] });
+    expect(v.valid).toBe(false);
+    expect(reasonOf(v)).toBe("web_search: empty result");
   });
 
   it("rejects a result with only empty strings", () => {
