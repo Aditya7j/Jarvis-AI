@@ -132,7 +132,7 @@ const SEQUENCE_10: GoldenCase[] = [
   { id: "S1", category: "date", question: "What is today's date?", intent: "date", source: "tool", offlineSafe: true },
   { id: "S2", category: "search", question: "Who is the current prime minister of India?", intent: "search", source: "tool", contains: ["Modi"] },
   { id: "S3", category: "math", question: "What is 27 * 43?", intent: "math", source: "tool", contains: ["1161"], offlineSafe: true },
-  { id: "S4", category: "search", question: "What is React?", intent: "search", source: "tool" },
+  { id: "S4", category: "reasoning", question: "What is React?", intent: "reasoning", source: "reasoning" },
   { id: "S5", category: "search", question: "What is the capital of Japan?", intent: "search", source: "tool", contains: ["Tokyo"] },
   { id: "S6", category: "date", question: "What is today's date?", intent: "date", source: "tool", offlineSafe: true },
   { id: "S7", category: "search", question: "Who is the current prime minister of India?", intent: "search", source: "tool", contains: ["Modi"] },

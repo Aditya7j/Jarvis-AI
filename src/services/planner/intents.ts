@@ -22,6 +22,7 @@ import {
   parseCurrencyRequest,
 } from "@/lib/toolkit/web";
 import { extractDateTokens } from "@/lib/time/date-calc";
+import { parseMathProblem } from "@/lib/toolkit/math";
 
 /**
  * Greetings and casual conversation. These are whole-message matches: a greeting
@@ -93,10 +94,41 @@ const CALCULATOR_IMPLICIT: RegExp[] = [
   /\b\d+(?:\.\d+)?\s*(?:percent|%)\s+of\b/i,
   /\b\d+(?:\.\d+)?\s*(?:mod|modulo)\s+\d+\b/i,
   /\b(?:sqrt|square\s+root|cube\s+root|cbrt|sin|cos|tan|ln|log)\s*(?:of\s+)?\s*\d/i,
+  /\b\d+(?:\.\d+)?\s+ka\s+(?:square\s+root|cube\s+root|sqrt|cbrt|vargamul|varg\s+mul)\b/i,
   /\b(?:divide|multiply)\s+\d+(?:\.\d+)?\s+by\s+\d+\b/i,
   /\b\d+\s+to\s+the\s+power\s+of\s+\d+\b/i,
-  /\b[a-z]\s*[+\-*/÷×]\s*\d+(?:\.\d+)?\s*=\s*\d+(?:\.\d+)?\b/i,
-  /\b\d+(?:\.\d+)?\s*[+\-*/÷×]\s*[a-z]\s*=\s*\d+(?:\.\d+)?\b/i,
+  /\b\d+(?:\.\d+)?\s+ka\s+(?:square|varg)\b/i,
+  /\b\d+(?:\.\d+)?\s+ka\s+cube\b/i,
+  /\b\d+\s*(?:squared|cubed)\b/i,
+  /\b(?:square|cube)\s+of\s+\d+\b/i,
+  /\b\d+(?:\.\d+)?\s*(?:²|³)/i,
+  /\b(?:prime\s+factorization|prime\s+factorisation|prime\s+factors)\s+of\s+\d+\b/i,
+  /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)\s+(?:times|plus|minus|multiplied\s+by|divided\s+by)\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|\d+)\b/i,
+  /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)\s+percent\s+of\b/i,
+  /\b\d+(?:\.\d+)?\s*[+\-*/×÷]\s*\d+(?:\.\d+)?\s*=\s*\d+(?:\.\d+)?\b/i,
+  /\b[a-z]\s*[+\-*/×÷]\s*\d+(?:\.\d+)?\s*=\s*\d+(?:\.\d+)?\b/i,
+  /\b\d+(?:\.\d+)?\s*[+\-*/×÷]\s*[a-z]\s*=\s*\d+(?:\.\d+)?\b/i,
+];
+
+/**
+ * Percent change / increase-amount problems stated in words. Requires a
+ * question/command cue so a bare statement ("The price increased by 20%") is
+ * never hijacked into the calculator.
+ */
+const WORD_PERCENT_PATTERNS: RegExp[] = [
+  /\b(?:increased?|decreased?|rose|fell|rises|falls|changed|changes)\s+by\s+\d+(?:\.\d+)?\s*%/i,
+  /\b(?:net|overall|total)\s+(?:percentage\s+change|percent\s+change|change|effect|impact)\b/i,
+  /\b\d+(?:\.\d+)?\s+ko\s+\d+(?:\.\d+)?\s*%\s+(?:increase|decrease|badhao|badha\s+do|ghatao|ghata\s+do|kam\s+karo)\b/i,
+  /\b\d+\s+(?:को|का)\s+\d+(?:\.\d+)?\s*%\b/u,
+];
+
+const WORD_PROBLEM_CUE =
+  /^(?:increase|decrease)\b|\b(?:what|how\s+much|net|overall|total|find|calculate|compute|solve|result|kya|kitna|karo|kijiye|batao|nikaalo|nikalo)\b/i;
+
+const EQUATION_CUE_PATTERNS: RegExp[] = [
+  /\b(?:find\s+x|solve\s+for\s+x|x\s*=)\b/i,
+  /\b\d+\s*(?:\*)?\s*x\s*(?:[+-]\s*)?\d+\s*=\s*-?\d+\b/i,
+  /\bx\s*(?:[+-]\s*)?\d+\s*=\s*-?\d+\b/i,
 ];
 
 export function detectCalculator(text: string): boolean {
@@ -109,6 +141,15 @@ export function detectCalculator(text: string): boolean {
   }
   if (CALCULATOR_IMPLICIT.some((pattern) => pattern.test(text))) return true;
   if (ARITHMETIC_HINDI.some((pattern) => pattern.test(text))) return true;
+  if (
+    WORD_PERCENT_PATTERNS.some((pattern) => pattern.test(text)) &&
+    WORD_PROBLEM_CUE.test(text) &&
+    /\d+\s*(?:%|percent)/i.test(text)
+  ) {
+    return true;
+  }
+  if (EQUATION_CUE_PATTERNS.some((pattern) => pattern.test(text))) return true;
+  if (parseMathProblem(text) !== null) return true;
   if (
     CALCULATOR_HINDI_EXPLICIT.test(text) ||
     CALCULATOR_HINGLISH_EXPLICIT.test(text)
@@ -192,6 +233,10 @@ const KNOWLEDGE_PHRASING: RegExp[] = [
   /\bwhich\s+[\w-]+\s+(?:is|are|was|were|has|have|won|had|did|does|do|became)\b/i,
   /\bwho\s+won\b/i,
   /\btell\s+me\s+(?:the\s+|about\s+the\s+)\w+\s+(?:of|in|on)\b/i,
+  // Hinglish "who/what" fact lookups ("India ka pehla Sikh Prime Minister
+  // kaun tha?"). The factual noun must precede the Hinglish interrogative so
+  // definitional "kya hai" questions ("React kya hai?") stay on reasoning.
+  /\b(?:prime\s+minister|president|capital|population|history|founded|invented|discovered|highest|largest|tallest|winner|champion|rajdhani|rashtrapati|pradhan\s+mantri)\b[^.,!?]{0,60}\b(?:kaun|kis|konsa|kiska|kiski)\s+(?:hai|tha|thi|hain|the)\b/i,
 ];
 
 const KNOWLEDGE_EXCLUSIONS: RegExp[] = [
@@ -199,6 +244,14 @@ const KNOWLEDGE_EXCLUSIONS: RegExp[] = [
   // definitional, not fact lookups — the web returns unrelated pages for them,
   // so the reasoning model answers instead of surfacing junk.
   /\bwhat(?:'?s|\s+is)\s+not\b/i,
+  // Definitional coding/programming questions ("what is React?", "what is
+  // JS?") are explainable by the reasoning model from training; a web search
+  // returns unrelated or ambiguous pages for them.
+  /\bwhat(?:'?s|\s+is|\s+are)\s+(?:the\s+)?(?:react|js\b|javascript|typescript|css\b|html\b|node(?:\.js)?|vue\b|angular|redux|closure|promise)\b/i,
+  // Fictional/mythical places ("what is the capital of Atlantis?") have no
+  // factual web answer — the reasoning model correctly explains they are
+  // fictional instead of surfacing irrelevant pages.
+  /\b(?:atlantis|wakanda|narnia|hogwarts|middle-?earth|mordor|gotham|metropolis|krypton|asgard)\b/i,
   /\btell\s+me\s+the\s+story\b/i,
   /\bwhat\s+does\s+it\s+say\b/i,
   /\bwho\s+are\s+you\b/i,
@@ -216,9 +269,53 @@ const KNOWLEDGE_EXCLUSIONS: RegExp[] = [
   /\bwhat\s+happened\s+to\s+you\b/i,
 ];
 
+/**
+ * Definitional question vs a factual lookup. "What is React?", "What is a
+ * JavaScript closure?" and "What is REST API?" are explainable by the
+ * reasoning model and — historically — a web search for them returned
+ * unrelated pages or full Wikipedia dumps. So a SIMPLE definitional question
+ * whose term is a clearly technical/proper form (capitalized/acronym, e.g.
+ * React, REST API, JavaScript closure, X) or carries an explicit article
+ * ("a/an") is routed off the web. Qualified or generic questions
+ * ("What is the capital of France?", "What is photosynthesis?") stay on web
+ * knowledge, which has real sources for them.
+ */
+export function detectDefinitionalQuestion(text: string): boolean {
+  if (!text) return false;
+  // Other wh-forms and any qualifier/preposition keep the question on the web.
+  if (/\b(?:who|when|where|why|how|whose|which|whom)\b/i.test(text)) return false;
+  if (/\b(?:the|of|for|in|at|by|from|to)\b/i.test(text)) return false;
+  if (
+    /\b(?:biggest|largest|smallest|tallest|shortest|highest|lowest|best|worst|first|oldest|newest|longest|fastest|most|least|current|latest|now|today)\b/i.test(
+      text
+    )
+  ) {
+    return false;
+  }
+  if (/\b(?:my|your)\b/i.test(text)) return false;
+  if (
+    /\b(?:people|person|film|movie|song|show|series|team|player|country|city|capital|population|president|minister|winner|champion|weather|news|time|date)\b/i.test(
+      text
+    )
+  ) {
+    return false;
+  }
+  const cleaned = text.replace(/[?.!]+\s*$/, "").trim();
+  const match = cleaned.match(/^(?:what(?:'s|s)|\bwhat\s+(?:is|are|was|were))\s+(.+)$/i);
+  if (!match) return false;
+  const term = match[1].trim();
+  if (!term || term.length > 48 || /\s{2,}/.test(term)) return false;
+  const words = term.split(/\s+/).filter(Boolean);
+  if (words.length > 3) return false;
+  const hasArticle = /^(?:a|an)\s+/i.test(term);
+  const hasTechnicalForm = /[A-Z]{2,}/.test(term) || /^[A-Z]/.test(term);
+  return hasArticle || hasTechnicalForm;
+}
+
 export function detectKnowledge(text: string): boolean {
   if (!text) return false;
   if (KNOWLEDGE_EXCLUSIONS.some((pattern) => pattern.test(text))) return false;
+  if (detectDefinitionalQuestion(text)) return false;
   return KNOWLEDGE_PHRASING.some((pattern) => pattern.test(text));
 }
 
@@ -476,6 +573,8 @@ export function detectOcr(text: string): boolean {
  */
 const DATE_CALC_PHRASING: RegExp[] = [
   /\bwhat\s+day\b/i,
+  /\bwhat\s+date\b/i,
+  /\bwhat(?:'?s|\s+is|\s+will\s+be)\s+the\s+date\b/i,
   /\bwhat\s+weekday\b/i,
   /\bwhich\s+day\b/i,
   /\bday\s+of\s+the\s+week\b/i,
@@ -512,6 +611,30 @@ export function detectDateCorrection(text: string): boolean {
 export function detectTime(text: string): boolean {
   if (!text) return false;
   return matchesAny(text, TIME_PATTERNS);
+}
+
+const TIME_PLACE_PATTERNS: RegExp[] = [
+  /\b(?:time|समय|टाइम)[^.]*\b(?:in|at)\s+([a-z][a-z0-9\s-]{1,40}?)[?.!]?\s*$/i,
+  /([a-z][a-z0-9\s-]{1,40}?)\s+(?:mein|में)\s*$/i,
+];
+
+/**
+ * Extract the place a time question asks about: "what time is it in tokyo?"
+ * → "tokyo", "kya time hua delhi mein" → "delhi". Returns null for a plain
+ * local-time question. The value is validated against known timezones by the
+ * time tool; an unknown place simply falls back to the local clock.
+ */
+export function extractTimePlace(text: string): string | null {
+  if (!text) return null;
+  for (const pattern of TIME_PLACE_PATTERNS) {
+    const match = text.trim().match(pattern);
+    const raw = match?.[1];
+    if (raw) {
+      const place = raw.trim().replace(/[?.!]\s*$/, "");
+      if (place.length >= 2) return place;
+    }
+  }
+  return null;
 }
 
 export function detectDate(text: string): boolean {

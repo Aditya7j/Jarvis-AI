@@ -111,7 +111,7 @@ const SEQUENCE_10: GoldenCase[] = [
   { question: "What is today's date?", expected: "date" },
   { question: "Who is the current prime minister of India?", expected: "search" },
   { question: "What is 27 * 43?", expected: "math" },
-  { question: "What is React?", expected: "search" },
+  { question: "What is React?", expected: "reasoning" },
   { question: "What is the capital of Japan?", expected: "search" },
   { question: "What is today's date?", expected: "date" },
   { question: "Who is the current prime minister of India?", expected: "search" },
@@ -164,7 +164,7 @@ const ROUTING_REGRESSIONS: GoldenCase[] = [
  * the web has no usable answer); math stays on the calculator.
  */
 const EIGHT_QUESTIONS: GoldenCase[] = [
-  { question: "What is React?", expected: "search" },
+  { question: "What is React?", expected: "reasoning" },
   { question: "What is not just?", expected: "reasoning" },
   { question: "What is not JS?", expected: "reasoning" },
   { question: "Who is the first Sikh Prime Minister of India?", expected: "search" },

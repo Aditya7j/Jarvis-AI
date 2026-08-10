@@ -4,7 +4,7 @@
  * conversion tables. Neither ever guesses.
  */
 
-import { evaluateExpression } from "@/lib/toolkit/math";
+import { solveMathProblem } from "@/lib/toolkit/math";
 import {
   convertUnit,
   listSupportedUnits,
@@ -32,11 +32,12 @@ export const calculate: Tool = {
   run: async (args) => {
     const expression = stringArg(args, "expression");
     if (!expression) throw new Error("The 'expression' argument is required.");
-    const result = evaluateExpression(expression);
+    const result = solveMathProblem(expression);
     return {
       expression: result.expression,
       value: result.value,
       formatted: result.formatted,
+      reply: result.reply,
     };
   },
 };

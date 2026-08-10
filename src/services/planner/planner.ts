@@ -375,3 +375,35 @@ export function toolLabelForClass(cls: PlanClass): string {
 export function isDirectClass(cls: PlanClass): boolean {
   return DIRECT_CLASSES.has(cls);
 }
+
+/**
+ * Deterministic classes whose facts come exclusively from their own closed,
+ * verified tool (calculator, system clock, weather API, memory, …). These
+ * classes must NEVER fall back to web search: web content is not a legitimate
+ * answer source for them. Only the `search` class may invoke web_search.
+ */
+export const NO_WEB_FALLBACK_CLASSES: ReadonlySet<PlanClass> = new Set([
+  "math",
+  "conversion",
+  "time",
+  "date",
+  "date-calc",
+  "weather",
+  "tasks",
+  "memory",
+  "calendar",
+  "profile",
+  "system",
+  "location",
+  "vision",
+]);
+
+/**
+ * Hard no-web-fallback invariant. Returns true when `cls` is forbidden from
+ * executing web_search. If a routing bug ever attaches web_search to one of
+ * these classes, the pipeline must refuse (verification_failed) instead of
+ * executing it — a deterministic class never answers from web content.
+ */
+export function assertNoWebFallback(cls: PlanClass): boolean {
+  return NO_WEB_FALLBACK_CLASSES.has(cls);
+}

@@ -9,7 +9,8 @@
  *      the pipeline defers to the reasoning model instead of a canned refusal.
  *   3. Genuine search AVAILABILITY failures (network down) still refuse — the
  *      model is never asked to guess when the web simply could not be reached.
- *   4. "What is React?" answers with a single clean topic, not a bullet list.
+ *   4. "What is React?" reasons from training — it never hits the web and
+ *      never returns a bullet list.
  *   5. Math answers survive polite framing ("I ask you what is the square
  *      root of 16").
  */
@@ -108,20 +109,17 @@ describe("the 8-question acceptance set (offline pipeline)", () => {
     vi.useRealTimers();
   });
 
-  it("What is React? → search, single clean topic answer, no bullet list, no LLM", async () => {
-    (webSearch as Mock).mockResolvedValue(REACT_TOPIC);
-    const model = fakeModel(["never"]);
+  it("What is React? → reasoning, single clean answer, no tools, no web", async () => {
+    const model = fakeModel(["React is a free and open-source front-end JavaScript library for building user interfaces."]);
     const spy = vi.spyOn(model, "streamText");
     const events = await collect("What is React?", model);
     const text = tokensOf(events);
-    expect(planOf(events)?.intent).toBe("search");
-    expect(toolOf(events)?.tool).toBe("web_search");
-    expect(toolOf(events)?.ok).toBe(true);
-    expect(text).toContain("React (software)");
-    expect(text).toContain("free and open-source front-end JavaScript library");
+    expect(planOf(events)?.intent).toBe("reasoning");
+    expect(events.filter((e) => e.kind === "tool").length).toBe(0);
+    expect(text).toContain("JavaScript library");
     expect(text).not.toContain("- ");
-    expect(text).not.toContain("component-based UIs");
-    expect(spy).not.toHaveBeenCalled();
+    expect(webSearch).not.toHaveBeenCalled();
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
   it("What is not just? → reasoning (the web surfaces unrelated pages)", async () => {

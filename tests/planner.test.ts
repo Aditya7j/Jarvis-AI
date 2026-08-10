@@ -32,6 +32,9 @@ describe("Intent Planner", () => {
       ["Convert 5 miles to kilometers", "conversion"],
       ["How many feet in 10 meters?", "conversion"],
       ["What is 100 USD in EUR?", "conversion"],
+      ["What is 32 degrees Celsius in Fahrenheit?", "conversion"],
+      ["Convert 100 kilometers per hour to miles per hour", "conversion"],
+      ["How many miles are in 10 kilometers?", "conversion"],
       ["Search the web for openai news", "search"],
       ["What are today's headlines?", "search"],
       ["Directions to the airport", "search"],
@@ -61,7 +64,6 @@ describe("Intent Planner", () => {
     });
 
     it("keeps general conversation on the LLM", () => {
-      expect(classifyPlanIntent("What is React?")).toBe("search");
       expect(classifyPlanIntent("Tell me a joke")).toBe("reasoning");
       expect(
         classifyPlanIntent("Write a Python function that sorts a list")
@@ -261,7 +263,7 @@ describe("tool-invocation contract", () => {
       "What is climate change?",
       "What is humidity?",
       "Where is the git config file?",
-      "What is React?",
+      "What is a closure in JavaScript?",
     ])("%s → search via web_search", (prompt) => {
       expect(classifyPlanIntent(prompt)).toBe("search");
       expect(planRoute(prompt).step.tools).toEqual(["web_search"]);

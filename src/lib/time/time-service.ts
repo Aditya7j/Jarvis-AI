@@ -109,6 +109,149 @@ export function getSystemClock(now = new Date()): SystemClockFact {
   };
 }
 
+/** Common place → IANA timezone lookups for "what time is it in <place>?". */
+const PLACE_TIMEZONES: Record<string, string> = {
+  tokyo: "Asia/Tokyo",
+  japan: "Asia/Tokyo",
+  osaka: "Asia/Tokyo",
+  "new york": "America/New_York",
+  nyc: "America/New_York",
+  manhattan: "America/New_York",
+  london: "Europe/London",
+  england: "Europe/London",
+  "united kingdom": "Europe/London",
+  uk: "Europe/London",
+  paris: "Europe/Paris",
+  france: "Europe/Paris",
+  delhi: "Asia/Kolkata",
+  "new delhi": "Asia/Kolkata",
+  india: "Asia/Kolkata",
+  mumbai: "Asia/Kolkata",
+  bangalore: "Asia/Kolkata",
+  bengaluru: "Asia/Kolkata",
+  chennai: "Asia/Kolkata",
+  kolkata: "Asia/Kolkata",
+  "los angeles": "America/Los_Angeles",
+  la: "America/Los_Angeles",
+  "san francisco": "America/Los_Angeles",
+  chicago: "America/Chicago",
+  "washington dc": "America/New_York",
+  toronto: "America/Toronto",
+  canada: "America/Toronto",
+  sydney: "Australia/Sydney",
+  melbourne: "Australia/Melbourne",
+  berlin: "Europe/Berlin",
+  germany: "Europe/Berlin",
+  dubai: "Asia/Dubai",
+  uae: "Asia/Dubai",
+  singapore: "Asia/Singapore",
+  "hong kong": "Asia/Hong_Kong",
+  beijing: "Asia/Shanghai",
+  shanghai: "Asia/Shanghai",
+  china: "Asia/Shanghai",
+  seoul: "Asia/Seoul",
+  "south korea": "Asia/Seoul",
+  moscow: "Europe/Moscow",
+  russia: "Europe/Moscow",
+  rome: "Europe/Rome",
+  madrid: "Europe/Madrid",
+  amsterdam: "Europe/Amsterdam",
+  istanbul: "Europe/Istanbul",
+  turkey: "Europe/Istanbul",
+  brazil: "America/Sao_Paulo",
+  "sao paulo": "America/Sao_Paulo",
+  rio: "America/Sao_Paulo",
+  mexico: "America/Mexico_City",
+  "mexico city": "America/Mexico_City",
+};
+
+function placeKey(place: string): string {
+  return place
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** The IANA timezone for a named place, or null when the place is unknown. */
+export function timezoneForPlace(place: string): string | null {
+  if (!place) return null;
+  return PLACE_TIMEZONES[placeKey(place)] ?? null;
+}
+
+interface TzFormatters {
+  time: Intl.DateTimeFormat;
+  date: Intl.DateTimeFormat;
+  full: Intl.DateTimeFormat;
+  hour: Intl.DateTimeFormat;
+}
+
+const TZ_FORMATTER_CACHE = new Map<string, TzFormatters>();
+
+function tzFormatters(timeZone: string): TzFormatters {
+  const cached = TZ_FORMATTER_CACHE.get(timeZone);
+  if (cached) return cached;
+  const formatters: TzFormatters = {
+    time: new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
+    }),
+    date: new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    }),
+    full: new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      timeZoneName: "short",
+    }),
+    hour: new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "numeric",
+      hourCycle: "h23",
+    }),
+  };
+  TZ_FORMATTER_CACHE.set(timeZone, formatters);
+  return formatters;
+}
+
+/**
+ * Verified current date/time in a specific IANA timezone (e.g. "Asia/Tokyo"
+ * for "what time is it in Tokyo?"). The instant (iso/unixMs) is the same as
+ * the local clock; only the wall-clock display, timezone label and greeting
+ * are computed in the target zone.
+ */
+export function getClockInTimezone(
+  timeZone: string,
+  now = new Date()
+): SystemClockFact {
+  const f = tzFormatters(timeZone);
+  const hour = Number(f.hour.format(now));
+  const dayPart = getDayPart(Number.isFinite(hour) ? hour : now.getHours());
+  return {
+    iso: now.toISOString(),
+    unixMs: now.getTime(),
+    time: f.time.format(now),
+    date: f.date.format(now),
+    timezone: timeZone,
+    formatted: f.full.format(now),
+    greeting: GREETING_TEXT[dayPart],
+    dayPart,
+  };
+}
+
 /** Calendar "today": start-of-day unix ms in the local timezone. */
 export function getDayStart(now = new Date()): number {
   return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();

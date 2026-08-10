@@ -4,7 +4,12 @@
  */
 
 import { analyzeDateQuery, isoDate, weekdayName } from "@/lib/time/date-calc";
-import { getSystemClock, logTimeService } from "@/lib/time/time-service";
+import {
+  getClockInTimezone,
+  getSystemClock,
+  logTimeService,
+  timezoneForPlace,
+} from "@/lib/time/time-service";
 import { stringArg } from "../args";
 import { validateClockFact, validateDateFact } from "../validators";
 import type { Tool } from "../types";
@@ -12,17 +17,31 @@ import type { Tool } from "../types";
 export const getCurrentTime: Tool = {
   definition: {
     name: "get_current_time",
-    description: "Get the current date, time and timezone of this machine.",
+    description:
+      "Get the current date, time and timezone of this machine — or of a named city/country when a place is given ('What time is it in Tokyo?').",
     category: "time",
     runtime: "any",
     cacheable: false,
     timeoutMs: 2_000,
     validate: validateClockFact,
+    parameters: [
+      {
+        name: "place",
+        type: "string",
+        description:
+          "Optional city or country to report the current time for (e.g. 'Tokyo', 'New York'). Omit for the local time.",
+        required: false,
+      },
+    ],
   },
-  run: async () => {
-    const clock = getSystemClock();
+  run: async (args) => {
+    const place = stringArg(args, "place", "");
+    const timeZone = place ? timezoneForPlace(place) : null;
+    const clock = timeZone
+      ? getClockInTimezone(timeZone)
+      : getSystemClock();
     logTimeService("get_current_time", clock);
-    return clock;
+    return { ...clock, ...(timeZone ? { place } : {}) };
   },
 };
 

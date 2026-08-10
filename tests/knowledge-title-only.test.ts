@@ -1,10 +1,10 @@
 /**
  * Knowledge-answer integrity suite.
  *
- * 1. Title-only invariant: a search result that contains ONLY a title (e.g.
- *    "React") can never become the final answer. When DuckDuckGo returns a
- *    heading plus real topic text, the answer is the topic content. When it
- *    returns only a heading, the tool fails honestly instead of echoing it.
+ * 1. Title-only invariant: a search result that contains ONLY a heading can
+ *    never become the final answer. When DuckDuckGo returns a heading plus
+ *    real topic text, the answer is the topic content. When it returns only a
+ *    heading, the tool fails honestly instead of echoing it.
  * 2. Date runtime proof: the "current date" answer matches the REAL system
  *    clock (no fake timers) — the reported wrong year came from the machine
  *    clock, not the code.
@@ -103,35 +103,35 @@ describe("knowledge answer integrity", () => {
     vi.useRealTimers();
   });
 
-  it("What is React? → answers with the real topic content, never the bare title 'React'", async () => {
+  it("a search answer is the real topic content, never the bare heading", async () => {
     mockSearchSources({
-      Heading: "React",
+      Heading: "Event loop",
       AbstractText: "",
       Answer: "",
       RelatedTopics: [
         {
-          Text: "React (software) — A free and open-source front-end JavaScript library for building user interfaces.",
-          FirstURL: "https://duckduckgo.com/?q=react",
+          Text: "Event loop (JavaScript) — The mechanism that handles asynchronous operations in JavaScript.",
+          FirstURL: "https://duckduckgo.com/?q=event-loop",
         },
       ],
     });
-    const events = await collect("What is React?", fakeModel(["never"]));
+    const events = await collect("What is the event loop?", fakeModel(["never"]));
     const text = tokensOf(events);
     expect(planOf(events)?.intent).toBe("search");
     expect(toolOf(events)?.tool).toBe("web_search");
     expect(toolOf(events)?.ok).toBe(true);
-    expect(text).not.toBe("React");
-    expect(text).toContain("React (software)");
+    expect(text).not.toBe("Event loop");
+    expect(text).toContain("asynchronous operations");
   });
 
-  it("a search result that is ONLY a title can never become the answer — the tool fails honestly", async () => {
-    mockSearchSources({ Heading: "Vue", AbstractText: "", Answer: "", RelatedTopics: [] });
-    const events = await collect("What is Vue?", fakeModel(["never"]));
+  it("a search result that is ONLY a heading can never become the answer — the tool fails honestly", async () => {
+    mockSearchSources({ Heading: "Closure", AbstractText: "", Answer: "", RelatedTopics: [] });
+    const events = await collect("What is a closure in JavaScript?", fakeModel(["never"]));
     const text = tokensOf(events);
     expect(planOf(events)?.intent).toBe("search");
     expect(toolOf(events)?.tool).toBe("web_search");
     expect(toolOf(events)?.ok).toBe(false);
-    expect(text).not.toContain("Vue");
+    expect(text).not.toContain("Closure");
   });
 
   it("the date answer matches the REAL system clock (live runtime proof, no fake timers)", async () => {

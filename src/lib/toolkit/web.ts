@@ -675,62 +675,74 @@ export async function webSearch(
   const hit = cached(searchCache, key);
   if (hit) return hit;
   const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1&t=jarvis`;
-  const res = await fetchWithTimeout(url, timeoutMs, signal);
-  if (!res.ok) throw new ToolkitNetworkError(`Search service responded with ${res.status}.`);
-  let data: {
-    AbstractText?: string;
-    AbstractURL?: string;
-    Heading?: string;
-    Answer?: string;
-    AbstractSource?: string;
-    RelatedTopics?: Array<{ Text?: string; FirstURL?: string; Topics?: Array<{ Text?: string; FirstURL?: string }> }>;
-  } | null = null;
+
+  // The Wikipedia fallback is independent of DuckDuckGo, and most factual
+  // questions get no instant answer — start it concurrently so the fallback's
+  // round-trips don't stack behind DuckDuckGo's. If DuckDuckGo answers, the
+  // fallback is aborted and the instant answer is served immediately.
+  const fallbackController = new AbortController();
+  const onOuterAbort = () => fallbackController.abort();
+  signal?.addEventListener("abort", onOuterAbort, { once: true });
+  const fallbackPromise = searchKnowledgeFallback(query, timeoutMs, fallbackController.signal)
+    .catch(() => null);
+
+  let result: SearchResult | null = null;
+  let ddgError: unknown = null;
   try {
-    data = (await res.json()) as {
+    const res = await fetchWithTimeout(url, timeoutMs, signal);
+    if (!res.ok) throw new ToolkitNetworkError(`Search service responded with ${res.status}.`);
+    let data: {
       AbstractText?: string;
       AbstractURL?: string;
       Heading?: string;
       Answer?: string;
       AbstractSource?: string;
       RelatedTopics?: Array<{ Text?: string; FirstURL?: string; Topics?: Array<{ Text?: string; FirstURL?: string }> }>;
-    };
-  } catch {
-    // DuckDuckGo intermittently returns a truncated/empty body that cannot be
-    // parsed as JSON. Treat it as "no instant answer" and fall through to the
-    // Wikipedia fallback instead of surfacing a SyntaxError to the caller.
-    data = null;
-  }
-  const topics: SearchResult["topics"] = [];
-  for (const topic of data?.RelatedTopics ?? []) {
-    if (topic.Text && topic.FirstURL) {
-      topics.push({ text: topic.Text.slice(0, 200), url: topic.FirstURL });
-      if (topics.length >= 5) break;
-    } else if (Array.isArray(topic.Topics)) {
-      for (const sub of topic.Topics.slice(0, 5)) {
-        if (sub.Text && sub.FirstURL) topics.push({ text: sub.Text.slice(0, 200), url: sub.FirstURL });
-      }
+    } | null = null;
+    try {
+      data = (await res.json()) as {
+        AbstractText?: string;
+        AbstractURL?: string;
+        Heading?: string;
+        Answer?: string;
+        AbstractSource?: string;
+        RelatedTopics?: Array<{ Text?: string; FirstURL?: string; Topics?: Array<{ Text?: string; FirstURL?: string }> }>;
+      };
+    } catch {
+      // DuckDuckGo intermittently returns a truncated/empty body that cannot be
+      // parsed as JSON. Treat it as "no instant answer" and fall through to the
+      // Wikipedia fallback instead of surfacing a SyntaxError to the caller.
+      data = null;
     }
+    result = {
+      query,
+      heading: data?.Heading || null,
+      abstract: data?.AbstractText || null,
+      answer: data?.Answer || null,
+      source: data?.AbstractSource || null,
+      url: data?.AbstractURL || null,
+      topics: buildTopics(data?.RelatedTopics ?? []),
+      engine: "DuckDuckGo",
+    };
+  } catch (err) {
+    ddgError = err;
+  } finally {
+    signal?.removeEventListener("abort", onOuterAbort);
   }
-  let result: SearchResult = {
-    query,
-    heading: data?.Heading || null,
-    abstract: data?.AbstractText || null,
-    answer: data?.Answer || null,
-    source: data?.AbstractSource || null,
-    url: data?.AbstractURL || null,
-    topics,
-    engine: "DuckDuckGo",
-  };
-  // The Instant Answer API is empty for most general factual queries — fall
-  // back to Wikipedia search so the tool is genuinely useful. If that yields
-  // nothing either, return null rather than an empty result that downstream
-  // validation would treat as a failed tool call.
-  const empty = !result.abstract && !result.answer && result.topics.length === 0;
-  if (empty) {
-    const fallback = await searchKnowledgeFallback(query, timeoutMs, signal).catch(() => null);
+
+  const isEmpty = (r: SearchResult | null): boolean =>
+    !r || (!r.abstract && !r.answer && r.topics.length === 0);
+
+  if (!isEmpty(result)) {
+    // The instant answer is authoritative — cancel the concurrent fallback.
+    fallbackController.abort();
+  } else {
+    const fallback = await fallbackPromise;
     if (fallback) result = fallback;
+    else if (ddgError) throw ddgError;
   }
-  if (!result.abstract && !result.answer && result.topics.length === 0) return null;
+  if (isEmpty(result)) return null;
+  if (!result) return null;
   // Rank-qualified officeholder relevance gate: a "who is the first X of Y?"
   // question is only answered when the result actually mentions the office
   // ("...prime minister..."). An unrelated page (e.g. a demographics article
@@ -745,6 +757,23 @@ export async function webSearch(
   }
   searchCache.set(key, { value: result, at: Date.now() });
   return result;
+}
+
+function buildTopics(
+  related: Array<{ Text?: string; FirstURL?: string; Topics?: Array<{ Text?: string; FirstURL?: string }> }>
+): SearchResult["topics"] {
+  const topics: SearchResult["topics"] = [];
+  for (const topic of related) {
+    if (topic.Text && topic.FirstURL) {
+      topics.push({ text: topic.Text.slice(0, 200), url: topic.FirstURL });
+      if (topics.length >= 5) break;
+    } else if (Array.isArray(topic.Topics)) {
+      for (const sub of topic.Topics.slice(0, 5)) {
+        if (sub.Text && sub.FirstURL) topics.push({ text: sub.Text.slice(0, 200), url: sub.FirstURL });
+      }
+    }
+  }
+  return topics;
 }
 
 export interface NewsItem {
@@ -772,35 +801,38 @@ export async function fetchNews(
   const res = await fetchWithTimeout(HN_STORIES_URL, timeoutMs, signal);
   if (!res.ok) throw new ToolkitNetworkError(`News service responded with ${res.status}.`);
   const ids = (await res.json()) as number[];
-  const items: NewsItem[] = [];
-  for (const id of ids.slice(0, limit)) {
-    try {
-      const itemRes = await fetchWithTimeout(HN_ITEM_URL(id), timeoutMs, signal);
-      if (!itemRes.ok) continue;
-      const item = (await itemRes.json()) as {
-        title?: string;
-        url?: string;
-        score?: number;
-        by?: string;
-        time?: number;
-        descendants?: number;
-      };
-      if (!item.title || item.title.toLowerCase().includes("show hn")) continue;
-      items.push({
-        title: item.title,
-        url: item.url ?? `https://news.ycombinator.com/item?id=${id}`,
-        score: item.score ?? 0,
-        author: item.by ?? null,
-        time: item.time
-          ? new Date(item.time * 1000).toISOString()
-          : getSystemClock().iso,
-        comments: item.descendants ?? 0,
-      });
-      if (items.length >= limit) break;
-    } catch {
-      continue;
-    }
-  }
+  // Story bodies are independent of each other — fetch them concurrently so the
+  // news path is bounded by the slowest item, not the sum of all of them.
+  const fetched = await Promise.all(
+    ids.slice(0, limit).map(async (id) => {
+      try {
+        const itemRes = await fetchWithTimeout(HN_ITEM_URL(id), timeoutMs, signal);
+        if (!itemRes.ok) return null;
+        const item = (await itemRes.json()) as {
+          title?: string;
+          url?: string;
+          score?: number;
+          by?: string;
+          time?: number;
+          descendants?: number;
+        };
+        if (!item.title || item.title.toLowerCase().includes("show hn")) return null;
+        return {
+          title: item.title,
+          url: item.url ?? `https://news.ycombinator.com/item?id=${id}`,
+          score: item.score ?? 0,
+          author: item.by ?? null,
+          time: item.time
+            ? new Date(item.time * 1000).toISOString()
+            : getSystemClock().iso,
+          comments: item.descendants ?? 0,
+        } satisfies NewsItem;
+      } catch {
+        return null;
+      }
+    })
+  );
+  const items = fetched.filter((item): item is NewsItem => item !== null);
   if (items.length === 0) throw new ToolkitNetworkError("No news items available right now.");
   newsCache.set(key, { value: items, at: Date.now() });
   return items;

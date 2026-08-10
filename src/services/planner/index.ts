@@ -3,9 +3,11 @@
  */
 
 export {
+  assertNoWebFallback,
   classifyPlanIntent,
   classifyWithReasons,
   isDirectClass,
+  NO_WEB_FALLBACK_CLASSES,
   planRoute,
   toolLabelForClass,
   CLASS_LABELS,
@@ -24,6 +26,7 @@ export {
   detectDate,
   detectDateCalc,
   detectDateCorrection,
+  detectDefinitionalQuestion,
   detectGeolocation,
   detectGreeting,
   detectKnowledge,
@@ -44,6 +47,7 @@ export {
   detectUnitConversion,
   detectWeather,
   detectWebSearch,
+  extractTimePlace,
 } from "./intents";
 export { DIRECT_CLASSES } from "./types";
 export type { PlanAudit, PlanInput, PlanRoute, PlanStep, VerifiedFact } from "./types";

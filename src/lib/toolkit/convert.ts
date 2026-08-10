@@ -133,39 +133,63 @@ export function convertUnit(value: number, fromUnit: string, toUnit: string): Co
   return { value: round(result), fromUnit: from.def.name, toUnit: to.def.name, category: from.category, formatted };
 }
 
+const NUMBER_PATTERN = /\d[\d.,]*/;
+
+const REVERSED_CUE_PATTERN = /^(?:how\s+many|how\s+much)\b/i;
+
+/** Trim trailing punctuation/filler so "miles please." becomes "miles". */
+function cleanUnit(unit: string): string {
+  return unit
+    .trim()
+    .replace(/[.,!?]+$/, "")
+    .replace(/\s+(?:please|for\s+me)$/i, "")
+    .trim();
+}
+
 /**
  * Extract a conversion request from free text like
- * "convert 5 km to miles" / "5 kilograms in pounds" / "how many feet in 10 meters".
+ * "convert 5 km to miles" / "5 kilograms in pounds" / "how many feet in 10 meters"
+ * / "what is 32 degrees celsius in fahrenheit".
  * Returns null when the phrase is not a unit conversion.
+ *
+ * Units are split on the LAST separator word (to/into/in) so a source unit
+ * named "in" (inch) is never mistaken for the separator in "convert 5 in to cm".
+ * Units may span multiple words ("degrees celsius", "kilometers per hour").
  */
 export function parseConversionRequest(input: string): { value: number; from: string; to: string } | null {
   const text = input.toLowerCase().trim();
-  const a =
-    text.match(/(?:convert|what is|how many)\s+([\d.,]+\s+[a-z°/]+(?:\s+per\s+[a-z]+)?)\s+(?:to|in|into)\s+([a-z°/]+)/i) ??
-    text.match(/([\d.,]+\s+[a-z°/]+(?:\s+per\s+[a-z]+)?)\s+(?:to|in|into)\s+([a-z°/]+)/i);
-  // "how many feet in 10 meters" — target unit first, value+source after "in".
-  const b = text.match(
-    /(?:how many|how much)\s+([a-z°/]+(?:\s+per\s+[a-z]+)?)\s+(?:are\s+)?(?:in|into)\s+([\d.,]+\s+[a-z°/]+(?:\s+per\s+[a-z]+)?)/i
-  );
-  const match = a ?? b;
-  if (!match) return null;
+  if (!text) return null;
+
+  const separators = [...text.matchAll(/\b(?:to|into|in)\b/g)];
+  if (separators.length === 0) return null;
+  const sep = separators[separators.length - 1];
+  const left = text.slice(0, sep.index).trim();
+  const right = text.slice(sep.index + sep[0].length).trim();
+
+  const leftNumber = left.match(NUMBER_PATTERN);
+  const rightNumber = right.match(NUMBER_PATTERN);
+
   let valueText: string;
   let from: string;
   let to: string;
-  if (match === b) {
-    to = match[1];
-    const parts = match[2].split(/\s+/);
-    valueText = parts[0];
-    from = parts.slice(1).join(" ");
+  if (leftNumber) {
+    // "convert 5 km to miles" / "5 kilograms in pounds" / "what is 32 degrees celsius in fahrenheit"
+    valueText = leftNumber[0];
+    from = left.slice(leftNumber.index! + valueText.length).trim();
+    to = right;
+  } else if (rightNumber && REVERSED_CUE_PATTERN.test(left)) {
+    // "how many feet in 10 meters" — target unit first, value+source after "in".
+    to = left.replace(REVERSED_CUE_PATTERN, "").replace(/^\s*are\b/i, "").trim();
+    valueText = rightNumber[0];
+    from = right.slice(rightNumber.index! + valueText.length).trim();
   } else {
-    valueText = match[1].match(/^[\d.,]+/)?.[0] ?? "";
-    from = match[1].replace(/^[\d.,]+\s*/, "");
-    to = match[2];
+    return null;
   }
+
   const value = Number(valueText.replace(/,/g, ""));
   if (!Number.isFinite(value)) return null;
   if (!from || !to) return null;
-  return { value, from, to };
+  return { value, from: cleanUnit(from), to: cleanUnit(to) };
 }
 
 export function listSupportedUnits(): string[] {

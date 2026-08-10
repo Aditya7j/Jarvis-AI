@@ -63,6 +63,29 @@ describe("math toolkit normalizes Hindi/Hinglish arithmetic", () => {
     expect(evaluateExpression("2 गुना 3").formatted).toBe("6");
   });
 
+  it("strips Hinglish/Hindi compute commands without touching English or numbers", () => {
+    expect(evaluateExpression("ginti karo 15*4").value).toBe(60);
+    expect(evaluateExpression("hisab karo 12/3").value).toBe(4);
+    expect(evaluateExpression("hisaab nikalo 10+5").value).toBe(15);
+    expect(evaluateExpression("15*4 batao").value).toBe(60);
+    expect(evaluateExpression("15*4 batao").formatted).toBe("60");
+    expect(evaluateExpression("calculate karo 2+2").value).toBe(4);
+    expect(evaluateExpression("solve karo 100-30").value).toBe(70);
+    expect(evaluateExpression("ginti kijiye 7*6").value).toBe(42);
+    expect(evaluateExpression("गिनती करो 15*4").value).toBe(60);
+    expect(evaluateExpression("हिसाब करो 12/3").value).toBe(4);
+    expect(evaluateExpression("5 गुना करो 3").value).toBe(15);
+    expect(evaluateExpression("2 जोड़ करो 3").value).toBe(5);
+  });
+
+  it("does not break English expressions or numbers", () => {
+    expect(evaluateExpression("calculate 2 + 2").value).toBe(4);
+    expect(evaluateExpression("10 percent of 50").value).toBe(5);
+    expect(evaluateExpression("3 times 2").value).toBe(6);
+    expect(evaluateExpression("2.5 plus 1.5").value).toBe(4);
+    expect(evaluateExpression("what is the value of 12 / 4").value).toBe(3);
+  });
+
   it("keeps English arithmetic working", () => {
     expect(evaluateExpression("what is 2 + 2?").value).toBe(4);
     expect(evaluateExpression("5 times 3").value).toBe(15);
@@ -81,5 +104,20 @@ describe("chat pipeline answers Hindi/Hinglish math directly", () => {
   it("answers Hinglish arithmetic with no LLM", async () => {
     const events = await collect("kitna hoga 5 plus 3");
     expect(textOf(events)).toMatch(/= 8/);
+  });
+
+  it("answers Hinglish compute commands with no LLM", async () => {
+    const events = await collect("ginti karo 15*4");
+    const text = textOf(events);
+    expect(text).toMatch(/= 60/);
+    expect(text).not.toContain("should never be called");
+    const tool = events.find((e) => e.kind === "tool") as { tool: string; ok: boolean } | undefined;
+    expect(tool?.tool).toBe("calculate");
+    expect(tool?.ok).toBe(true);
+  });
+
+  it("answers Devanagari compute commands with no LLM", async () => {
+    const events = await collect("गिनती करो 15*4");
+    expect(textOf(events)).toMatch(/= 60/);
   });
 });

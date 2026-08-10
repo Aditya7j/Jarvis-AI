@@ -52,6 +52,7 @@ import { enrichSearchQuery, normalizeCurrency, parseCurrencyRequest } from "@/li
 import { getContextEngine } from "@/services/context/context-engine";
 import type { BatteryFact, WeatherFact } from "@/lib/ai/system-tools";
 import {
+  assertNoWebFallback,
   classifyPlanIntent,
   planRoute,
   type PlanClass,
@@ -67,6 +68,7 @@ import {
   detectMemoryStore,
   detectNews,
   detectTaskCreate,
+  extractTimePlace,
 } from "@/services/planner/intents";
 import type { VerifiedFact } from "@/services/planner/types";
 import { CoTFilter } from "@/services/reasoning";
@@ -371,6 +373,10 @@ function directArgs(cls: PlanClass, text: string): Record<string, unknown> {
     if (parsed) return { value: parsed.value, from: parsed.from, to: parsed.to };
   }
   if (cls === "date-calc") return { text };
+  if (cls === "time") {
+    const place = extractTimePlace(text);
+    return place ? { place } : {};
+  }
   return {};
 }
 
@@ -381,7 +387,10 @@ function directAnswer(
   language: SpokenLanguage
 ): string | null {
   if (cls === "math") {
-    const d = data as { expression?: string; formatted?: string };
+    const d = data as { expression?: string; formatted?: string; reply?: string };
+    // Word problems ("net percentage change", "25 ka 18%", "x + 5 = 12")
+    // carry a concise human reply — never echo the whole question back.
+    if (typeof d.reply === "string" && d.reply.trim()) return d.reply.trim();
     if (typeof d.formatted === "string") return `${d.expression ?? "That"} = ${d.formatted}`;
     return null;
   }
@@ -401,7 +410,13 @@ function directAnswer(
     return null;
   }
   if (cls === "time") {
-    const d = data as { unixMs?: number; time?: string };
+    const d = data as { unixMs?: number; time?: string; place?: string | null };
+    const place = typeof d.place === "string" && d.place.trim() ? d.place.trim() : null;
+    // A named place ("what time is it in Tokyo?") answers with the verified
+    // time in that timezone. The tool's `time` already carries the target
+    // zone's clock; the localized formatter is only valid for the LOCAL zone,
+    // so place queries always use the tool's own string.
+    if (place && typeof d.time === "string") return `It is ${d.time} in ${place}.`;
     if (typeof d.unixMs === "number") {
       const localized = formatTimeIn(language, d.unixMs);
       if (localized) {
@@ -861,9 +876,17 @@ function formatSearchDirect(fact: unknown, language: SpokenLanguage): string {
     topics?: Array<{ text?: string }>;
   };
   if (f.answer?.trim()) return f.answer.trim();
-  if (f.abstract?.trim()) {
+  const abstract = f.abstract?.trim();
+  if (abstract) {
     const prefix = f.source ? `According to ${f.source}: ` : "";
-    return `${prefix}${f.abstract.trim()}`;
+    // The Wikipedia lead is prefixed with its article title
+    // ("Closure (computer programming) — In computer science, a closure is …").
+    // The title is redundant in a spoken answer; keep only the definitional
+    // text, trimmed to the first sentence so a "what is X?" answer stays
+    // concise instead of dumping a 600-character lead.
+    const body = abstract.replace(/^[^—]+—\s*/, "");
+    const sentence = body.match(/^[^.!?]+[.!?]/)?.[0]?.trim() ?? body;
+    if (sentence) return `${prefix}${sentence.slice(0, 300)}`;
   }
   const topics = (f.topics ?? []).map((t) => t.text).filter(Boolean);
   if (topics.length > 0) {
@@ -1915,6 +1938,31 @@ export async function* runPipeline(
   }
 
   if (toolsToRun.length > 0) {
+    // Hard no-web-fallback invariant: only the `search` class may execute
+    // web_search. If a routing bug ever attaches web_search to a deterministic
+    // class (math/date/time/weather/memory/…), refuse with verification_failed
+    // instead of executing it — web content can never become a verified fact
+    // for a class whose truth comes from its own closed tool.
+    if (toolsToRun.includes("web_search") && assertNoWebFallback(cls)) {
+      fallbackReason = "verification_failed";
+      yield toolEvent(cls, "web_search", startedAt, false, fallbackReason);
+      yield { kind: "token", text: localizeReply(language, "toolUnavailable") };
+      source = cls === "memory" ? "memory" : "tool";
+      yield* finish({
+        requestId,
+        prompt,
+        cls,
+        routeKind: route.kind,
+        source,
+        tools: toolTraces,
+        verifiedFactCount: 0,
+        llmInvoked,
+        startedAt,
+        options,
+        fallbackReason,
+      });
+      return;
+    }
     const { facts: toolFacts, results } = await executeSteps(toolsToRun, argFor, {
       signal,
       requestId,
