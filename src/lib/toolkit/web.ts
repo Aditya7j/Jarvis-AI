@@ -1166,31 +1166,45 @@ async function searchKnowledgeFallback(
   // lead is unavailable and the fragment is bibliographic noise ("ISBN …"),
   // never paste it as an answer — move to the next ranked article's lead.
   let abstractTitle = best.title;
-  let lead = await fetchWikipediaLead(best.title, timeoutMs, signal).catch(() => null);
+  let resultUrl: string | null = null;
+  let lead: string | null = null;
+  if (cls.kind !== "rank-qualified") {
+    lead = await fetchWikipediaLead(best.title, timeoutMs, signal).catch(() => null);
+  }
 
   // Rank-qualified officeholder questions ("who was the FIRST x of y?", "x ka
   // pehla … kaun tha?") must never be answered from a page that doesn't
   // semantically support the requested relationship — the office, the place,
   // the rank AND the content qualifiers ("first Sikh prime minister of India").
-  // A page that only shares the office noun ("…Prime Minister of Punjab") is
-  // not the answer. Walk the ranked list for the first article whose lead
-  // supports all of it; if none does, return null so the caller defers rather
-  // than guessing.
+  // A page that only shares the office noun ("…Prime Minister of Punjab") or
+  // scatters the keywords across paragraphs (a movement article) is not the
+  // answer. Candidates are restricted to biographical articles and walked for
+  // the first whose lead PROVES the relationship; the proving sentence itself
+  // becomes the abstract so the answer identifies the person. If none proves
+  // it, return null so the caller defers rather than guessing.
   if (cls.kind === "rank-qualified") {
     const supports = (text: string | null) =>
       Boolean(text && contentSupportsRankQualified(text.toLowerCase(), cls));
-    if (!supports(lead)) {
-      lead = null;
-      for (const hit of ranked.slice(1)) {
-        const altLead = await fetchWikipediaLead(hit.title, timeoutMs, signal).catch(() => null);
-        if (supports(altLead)) {
-          lead = altLead;
-          abstractTitle = hit.title;
-          break;
-        }
+    const terms = rankQualifiedEvidenceTerms(cls);
+    let chosen: { title: string; evidence: string } | null = null;
+    for (const hit of ranked) {
+      if (!isRankQualifiedPersonTitle(hit.title)) continue;
+      const candidateLead = await fetchWikipediaLead(hit.title, timeoutMs, signal).catch(() => null);
+      if (!supports(candidateLead)) continue;
+      const evidence = relationshipEvidence(
+        candidateLead ?? "",
+        terms,
+        RANK_QUALIFIED_EVIDENCE_WINDOW
+      );
+      if (evidence) {
+        chosen = { title: hit.title, evidence };
+        break;
       }
     }
-    if (!lead) return null;
+    if (!chosen) return null;
+    abstractTitle = chosen.title;
+    lead = chosen.evidence;
+    resultUrl = `https://en.wikipedia.org/wiki/${encodeURIComponent(chosen.title.replace(/ /g, "_"))}`;
   }
   const snippet = cleanHtmlText(best.snippet ?? "");
   if (!lead && snippet && JUNK_SNIPPET_RE.test(snippet)) {
@@ -1213,7 +1227,7 @@ async function searchKnowledgeFallback(
     abstract,
     answer: null,
     source: "Wikipedia",
-    url: topics[0]?.url ?? null,
+    url: resultUrl ?? topics[0]?.url ?? null,
     topics,
     engine: "Wikipedia",
   };
@@ -1393,23 +1407,128 @@ function contentHasOffice(content: string, office: string): boolean {
   return tokens.every((t) => tokenInTitle(t, content));
 }
 
+interface RankQualifiedEvidence {
+  rank?: string;
+  officeNoun?: string;
+  qualifiers?: string[];
+  place?: string;
+  canonicalPlace?: string | null;
+}
+
+/**
+ * How tightly the rank, qualifiers, office and place must co-occur to count as
+ * evidence. A genuine answer fits in one sentence ("first and remains the only
+ * Sikh prime minister of India" — 9 words); the Khalistan movement lead that
+ * merely scatters the words spans ~90 words. A bounded window rejects the
+ * scatter while accepting every real relationship sentence.
+ */
+const RANK_QUALIFIED_EVIDENCE_WINDOW = 30;
+
+/** How tightly a possessive binding ("India's … prime minister") may fit. */
+const RANK_QUALIFIED_POSSESSIVE_WINDOW = 12;
+
+/** Whether every `terms` word appears within `windowSize` consecutive words. */
+function wordsCooccur(content: string, terms: string[], windowSize: number): boolean {
+  const need = new Set(terms.filter((t) => t.length >= 3));
+  if (need.size === 0) return true;
+  const tokens = content.toLowerCase().split(/[^a-z]+/).filter((t) => t.length > 0);
+  for (let start = 0; start < tokens.length; start++) {
+    const found = new Set<string>();
+    const end = Math.min(tokens.length, start + windowSize);
+    for (let i = start; i < end; i++) {
+      if (need.has(tokens[i])) found.add(tokens[i]);
+      if (found.size === need.size) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether the office noun is bound to the place: "prime minister OF INDIA" or
+ * "INDIA'S … prime minister". A lead that only says "prime minister of
+ * Pakistan" while "India" appears elsewhere does not bind the requested office
+ * to the requested place.
+ */
+function contentBindsOfficeToPlace(
+  content: string,
+  officeNoun: string,
+  place: string,
+  canonical: string | null
+): boolean {
+  const lower = content.toLowerCase();
+  const noun = officeNoun.toLowerCase();
+  if (noun.length < 3) return false;
+  const places = [place, canonical].filter((p): p is string => Boolean(p && p.trim().length > 0));
+  for (const p of places) {
+    const pLower = p.toLowerCase().replace(/^the\s+/, "").trim();
+    if (pLower.length < 3) continue;
+    if (
+      new RegExp(`\\b${escapeRegExp(noun)}\\s+of\\s+(?:the\\s+)?${escapeRegExp(pLower)}\\b`).test(
+        lower
+      )
+    ) {
+      return true;
+    }
+    if (
+      new RegExp(`\\b${escapeRegExp(pLower)}\\s*['’]\\s*s\\b`).test(lower) &&
+      wordsCooccur(lower, [noun, pLower], RANK_QUALIFIED_POSSESSIVE_WINDOW)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** All distinct words the relationship proof must co-occur for this query. */
+function rankQualifiedEvidenceTerms(rq: RankQualifiedEvidence): string[] {
+  const office = [...(rq.qualifiers ?? []), rq.officeNoun].filter(
+    (t): t is string => Boolean(t)
+  );
+  const placeTokens = (rq.canonicalPlace ?? rq.place ?? "")
+    .split(/\s+/)
+    .filter((t) => t.length >= 3);
+  return [...new Set([...office, rq.rank ?? "", ...placeTokens].filter((t) => t.length >= 3))];
+}
+
+/**
+ * The sentence that actually establishes the requested relationship, kept in
+ * the article's original casing. Used as the rank-qualified abstract so the
+ * answer names the requested person instead of an unrelated first sentence.
+ */
+function relationshipEvidence(content: string, terms: string[], windowSize: number): string | null {
+  const sentences = content.split(/(?<=[.!?])\s+/);
+  for (const sentence of sentences) {
+    if (sentence && wordsCooccur(sentence, terms, windowSize)) return sentence.trim();
+  }
+  return null;
+}
+
+/**
+ * Title gate for rank-qualified candidates: the answer to a person-role
+ * question ("who was the FIRST x of y?") is a person. A list, disambiguation,
+ * timeline or movement/topic page can never represent that person, so it is
+ * skipped before its lead is even read.
+ */
+function isRankQualifiedPersonTitle(title: string): boolean {
+  const lower = title.toLowerCase();
+  if (/^(?:list of|timeline of|index of|disambiguation|the\s+)/.test(lower)) return false;
+  if (/\b(?:movement|insurgency|religion|history|party|empire|dynasty|organisation|organization|association)\b/.test(lower)) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * Semantic support check for rank-qualified questions. The content must
- * establish the requested relationship: the office, the place, the rank AND
- * the content qualifiers ("first Sikh prime minister of India"). A result that
- * only shares the office noun ("…was Prime Minister of Punjab") cannot support
- * "…first Sikh Prime Minister of India" and is rejected — never guessed at.
+ * ESTABLISH the requested relationship: the office, the place, the rank AND
+ * the content qualifiers ("first Sikh prime minister of India"). The word
+ * checks are only a cheap pre-filter — the relationship is proven by a tight
+ * co-occurrence window with the office bound to the place. A result that only
+ * shares words scattered across paragraphs ("Khalistan movement": "first",
+ * "sikh", "prime minister of Pakistan", "India") cannot support the question
+ * and is rejected — never guessed at.
  */
-function contentSupportsRankQualified(
-  content: string,
-  rq: {
-    rank?: string;
-    officeNoun?: string;
-    qualifiers?: string[];
-    place?: string;
-    canonicalPlace?: string | null;
-  }
-): boolean {
+function contentSupportsRankQualified(content: string, rq: RankQualifiedEvidence): boolean {
   if (rq.officeNoun && !contentHasWord(content, rq.officeNoun)) return false;
   if (rq.place && !contentMentionsPlace(content, rq.place, rq.canonicalPlace ?? null)) return false;
   if (rq.rank && !contentHasWord(content, rq.rank)) return false;
@@ -1419,6 +1538,13 @@ function contentSupportsRankQualified(
     !rq.qualifiers.every((q) => contentHasWord(content, q))
   ) {
     return false;
+  }
+  if (rq.officeNoun && rq.place) {
+    const terms = rankQualifiedEvidenceTerms(rq);
+    if (!contentBindsOfficeToPlace(content, rq.officeNoun, rq.place, rq.canonicalPlace ?? null)) {
+      return false;
+    }
+    if (!wordsCooccur(content, terms, RANK_QUALIFIED_EVIDENCE_WINDOW)) return false;
   }
   return true;
 }
