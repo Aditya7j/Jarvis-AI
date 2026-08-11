@@ -28,6 +28,7 @@ import {
   parseHinglishOfficeholderOffice,
   parseHinglishRankQualifiedOffice,
   parseRankQualifiedOffice,
+  searchCache,
   webSearch,
 } from "@/lib/toolkit/web";
 
@@ -545,5 +546,164 @@ describe("webSearch relevance gates (mocked)", () => {
     expect(result?.answer).toContain("Narendra Modi");
     expect(result?.answer).toContain("Prime Minister of India");
     expect(fetchCalls().some((u) => u.includes("api.duckduckgo.com"))).toBe(false);
+  });
+});
+
+describe("webSearch cache validation (mocked)", () => {
+  function wrongCachedResult(query: string, heading: string, abstract: string) {
+    searchCache.set(query, {
+      value: {
+        query,
+        heading,
+        abstract,
+        answer: null,
+        source: "Wikipedia",
+        url: `https://en.wikipedia.org/wiki/${heading.replace(/ /g, "_")}`,
+        topics: [],
+        engine: "Wikipedia",
+      },
+      at: Date.now(),
+    });
+  }
+
+  it("rejects a stale cached result for a Hinglish officeholder query and re-runs the authoritative path", async () => {
+    // The OLD implementation cached an unrelated generic Wikipedia page for
+    // "india ka pradhan mantri kaun hai" (a playback singer) before the
+    // Hinglish officeholder parser existed. That stale entry must NOT be
+    // served; the query is re-classified as officeholder and answered from
+    // the infobox incumbent.
+    wrongCachedResult(
+      "india ka pradhan mantri kaun hai",
+      "Palak Muchhal",
+      "Palak Muchhal Sharma is an Indian playback singer and songwriter."
+    );
+    SEARCH_RESPONSES.set(
+      "search:prime minister india",
+      searchResult(["Prime Minister of India"])
+    );
+    SEARCH_RESPONSES.set(
+      "wt:Prime Minister of India",
+      "{{Infobox officeholder\n| office = Prime Minister of India\n| incumbent = [[Narendra Modi]]\n}}"
+    );
+    const result = await webSearch("india ka pradhan mantri kaun hai");
+    expect(result?.answer).toContain("Narendra Modi");
+    expect(result?.answer).toContain("Prime Minister of India");
+    expect(result?.answer).not.toContain("Palak");
+    // The stale entry was evicted and replaced with the validated result.
+    expect(searchCache.get("india ka pradhan mantri kaun hai")?.value.answer).toContain(
+      "Narendra Modi"
+    );
+  });
+
+  it("rejects a stale cached result for an English officeholder query and re-runs the authoritative path", async () => {
+    wrongCachedResult(
+      "who is the current prime minister of india",
+      "Palak Muchhal",
+      "Palak Muchhal Sharma is an Indian playback singer and songwriter."
+    );
+    SEARCH_RESPONSES.set(
+      "search:who is the current prime minister of india",
+      searchResult(["Prime Minister of India"])
+    );
+    SEARCH_RESPONSES.set(
+      "wt:Prime Minister of India",
+      "{{Infobox officeholder\n| office = Prime Minister of India\n| incumbent = [[Narendra Modi]]\n}}"
+    );
+    const result = await webSearch("who is the current prime minister of india");
+    expect(result?.answer).toContain("Narendra Modi");
+    expect(result?.answer).not.toContain("Palak");
+    expect(searchCache.get("who is the current prime minister of india")?.value.answer).toContain(
+      "Narendra Modi"
+    );
+  });
+
+  it("rejects a stale cached result for a capital query and re-runs the authoritative path", async () => {
+    // A generic country page (even one that mentions the capital) is not the
+    // structured capital answer — only the infobox-derived answer is valid.
+    wrongCachedResult(
+      "what is the capital of france",
+      "France",
+      "France is a country in Western Europe. Its capital is Paris."
+    );
+    SEARCH_RESPONSES.set(
+      "search:what is the capital of france",
+      searchResult(["France"])
+    );
+    SEARCH_RESPONSES.set(
+      "wt:France",
+      "{{Infobox country\n| capital = [[Paris]]\n| largest_city = Paris\n}}"
+    );
+    const result = await webSearch("what is the capital of france");
+    expect(result?.answer).toContain("Paris");
+    expect(result?.answer).toContain("capital of France");
+    expect(searchCache.get("what is the capital of france")?.value.answer).toContain("Paris");
+  });
+
+  it("a stale cached rank-qualified result cannot bypass the semantic gate", async () => {
+    // The stale entry answers with the CURRENT incumbent — it never names the
+    // requested rank ("first"). It must be rejected and the fresh search used.
+    searchCache.set("who was the first sikh prime minister of india", {
+      value: {
+        query: "who was the first sikh prime minister of india",
+        heading: "Prime Minister of India",
+        abstract: "The Prime Minister of India is the head of government.",
+        answer: "The current Prime Minister of India is Narendra Modi (per Wikipedia).",
+        source: "Wikipedia",
+        url: "https://en.wikipedia.org/wiki/Prime_Minister_of_India",
+        topics: [],
+        engine: "Wikipedia",
+      },
+      at: Date.now(),
+    });
+    SEARCH_RESPONSES.set(
+      "search:who was the first sikh prime minister of india",
+      searchResult(["Manmohan Singh"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Manmohan Singh",
+      "Manmohan Singh was the first Sikh prime minister of India, serving 2004 to 2014."
+    );
+    const result = await webSearch("who was the first sikh prime minister of india");
+    expect(result?.heading).toBe("Manmohan Singh");
+    expect(result?.abstract).toContain("first Sikh prime minister");
+    expect(result?.abstract).not.toContain("Narendra Modi");
+  });
+
+  it("rejects a stale generic cached result that never names the question's subject", async () => {
+    wrongCachedResult(
+      "what is a javascript closure",
+      "India",
+      "India is a country in South Asia."
+    );
+    SEARCH_RESPONSES.set(
+      "search:what is a javascript closure",
+      searchResult(["Closure (computer programming)"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Closure (computer programming)",
+      "In programming languages, a closure is a technique for implementing lexically scoped name binding."
+    );
+    const result = await webSearch("what is a javascript closure");
+    expect(result?.heading).toBe("Closure (computer programming)");
+    expect(result?.abstract).toContain("closure");
+    expect(result?.abstract).not.toContain("South Asia");
+  });
+
+  it("serves a valid cached result without re-hitting the network", async () => {
+    // Genuinely valid results keep the 5-minute cache behavior.
+    SEARCH_RESPONSES.set(
+      "search:what is a javascript closure",
+      searchResult(["Closure (computer programming)"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Closure (computer programming)",
+      "In programming languages, a closure is a technique for implementing lexically scoped name binding."
+    );
+    const first = await webSearch("what is a javascript closure");
+    expect(first?.heading).toBe("Closure (computer programming)");
+    const callsAfterFirst = fetchCalls().length;
+    const second = await webSearch("what is a javascript closure");
+    expect(second?.heading).toBe("Closure (computer programming)");
+    expect(fetchCalls().length).toBe(callsAfterFirst);
   });
 });

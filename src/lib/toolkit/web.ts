@@ -4,9 +4,12 @@
  * and is cached so repeated questions never hit the network twice.
  */
 
+import { aiLogger } from "@/lib/ai/logger";
 import { getSystemClock } from "@/lib/time/time-service";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
+
+const knowledgeLog = aiLogger.child("knowledge");
 
 interface CacheEntry<T> {
   value: T;
@@ -165,13 +168,12 @@ export interface SearchResult {
   engine: string;
 }
 
-const searchCache = new Map<string, CacheEntry<SearchResult>>();
+export const searchCache = new Map<string, CacheEntry<SearchResult>>();
 
 /** Clear the web-search result cache (tests and cache-busting flows). */
 export function invalidateSearchCache(): void {
   searchCache.clear();
 }
-
 /** Strip HTML tags and entities from a Wikipedia snippet fragment. */
 function cleanHtmlText(raw: string): string {
   return raw
@@ -210,9 +212,16 @@ export function isContentfulTopicText(text: string): boolean {
 // "Prime Minister's Office (India)" above "Prime Minister of India", and for
 // ambiguous "current prime minister" queries it surfaces "List of prime
 // ministers of Canada" — a list page, not an answer. We therefore rank hits
-// ourselves and, when the question is a "who is the current X of Y?" office
-// question, read the article's infobox `incumbent` field directly so the
-// answer names the actual officeholder instead of pasting a snippet.
+// ourselves and, for "who is the current X of Y?" officeholder questions
+// (English and Hinglish alike), answer ONLY from a validated office/place
+// article's infobox `incumbent` field.
+//
+// Invariant: officeholder -> incumbent extraction only. An officeholder query
+// must never produce an article lead, a generic Wikipedia abstract, a
+// RelatedTopics text, an arbitrary search result or an LLM-generated answer.
+// Discovery (search hits, canonical query, canonical title) is never proof of
+// relevance; every candidate passes isOfficeholderCandidate before its
+// infobox is read, and no incumbent means null — never a generic lead.
 // ---------------------------------------------------------------------------
 
 const SEARCH_STOPWORDS = new Set([
@@ -281,11 +290,13 @@ const PLACE_ALIASES: Record<string, string> = {
   us: "United States",
   "u.s.": "United States",
   america: "United States",
+  "united states": "United States",
   "united states of america": "United States",
   uk: "United Kingdom",
   "u.k.": "United Kingdom",
   britain: "United Kingdom",
   "great britain": "United Kingdom",
+  "united kingdom": "United Kingdom",
   uae: "United Arab Emirates",
   "u.a.e.": "United Arab Emirates",
   bharat: "India",
@@ -853,6 +864,131 @@ export function extractCapitalName(wikitext: string): string | null {
   return extractInfoboxField(wikitext, "capital");
 }
 
+export interface ValidatedOfficeholderArticle {
+  title: string;
+  incumbent: string;
+}
+
+/**
+ * Title gate for officeholder candidates — the relevance PROOF that a search
+ * hit actually represents the requested "office of place". Every office token
+ * and the place (canonical alias preferred) must be covered by the title, and
+ * the title must not be a list, disambiguation or administrative-body page.
+ * "Palak Muchhal Sharma" shares no office token and is rejected; "Prime
+ * Minister of India" validates. Wikipedia search ordering is discovery only —
+ * never relevance — so no hit is read for its incumbent until it passes here.
+ */
+export function isOfficeholderCandidate(
+  title: string,
+  office: string,
+  place: string,
+  canonicalPlace: string | null
+): boolean {
+  const lower = title.toLowerCase();
+  if (/^list of\b/.test(lower)) return false;
+  if (/\b(?:disambiguation|index of|timeline of|office)\b/.test(lower)) return false;
+  const officeTokens = office.split(/\s+/).filter((t) => t.length >= 3);
+  if (officeTokens.length === 0) return false;
+  const placeForTitle = canonicalPlace ?? place;
+  const cover = canonicalCover(lower, officeTokens, placeForTitle);
+  if (!cover.covered) return false;
+  // The canonical officeholder article is exactly the office + place; leftover
+  // title words ("office", "in", qualifiers, suffixes) mark an administrative
+  // or derivative page that does not carry the officeholder's incumbent.
+  if (cover.extraWords > 0) return false;
+  return true;
+}
+
+/**
+ * Structured retrieval for officeholder questions. Builds the canonical
+ * English "office + place" retrieval query from the CLASSIFIED structure
+ * (never the raw question), discovers candidates through Wikipedia search —
+ * the raw question, the canonical query and the exact canonical article title
+ * are all DISCOVERY ONLY — validates every candidate title against the
+ * requested office/place relationship, and reads the infobox `incumbent` of
+ * validated articles. Returns only a verified article + incumbent pair, or
+ * null when no candidate is trustworthy. Never falls through to a generic
+ * lead: an unvalidated candidate is no answer, period.
+ */
+export async function findValidatedOfficeholderArticle(
+  query: string,
+  office: string,
+  place: string,
+  canonicalPlace: string | null,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<ValidatedOfficeholderArticle | null> {
+  const log = knowledgeLog.child("officeholder");
+  const placeForSearch = canonicalPlace ?? place;
+  const canonicalQuery = `${office} ${placeForSearch}`;
+  const canonicalTitle = `${capitalizeWords(office)} of ${displayPlace(placeForSearch)}`;
+
+  const candidates: Array<{ title: string; snippet: string; pageid: number }> = [];
+  const collect = (hits: Array<{ title: string; snippet: string; pageid: number }>) => {
+    for (const h of hits) {
+      if (!candidates.some((c) => c.title === h.title)) candidates.push(h);
+    }
+  };
+
+  log.info("officeholder retrieval start", {
+    kind: "officeholder",
+    query,
+    office,
+    place,
+    canonicalPlace,
+    canonicalQuery,
+    canonicalTitle,
+  });
+
+  // Discovery — search ranking proves nothing about relevance; every hit below
+  // must survive isOfficeholderCandidate before its infobox is read.
+  collect(await searchWikipedia(query, timeoutMs, signal).catch(() => []));
+  collect(await searchWikipedia(canonicalQuery, timeoutMs, signal).catch(() => []));
+  collect(await searchWikipedia(canonicalTitle, timeoutMs, signal).catch(() => []));
+  const rawSuggestions = await opensearchSuggest(query, timeoutMs, signal).catch(() => []);
+  collect(rawSuggestions.map((title) => ({ title, snippet: "", pageid: 0 })));
+  const canonicalSuggestions = await opensearchSuggest(canonicalQuery, timeoutMs, signal).catch(() => []);
+  collect(canonicalSuggestions.map((title) => ({ title, snippet: "", pageid: 0 })));
+  log.info("officeholder candidates", { titles: candidates.map((c) => c.title) });
+
+  const rejected = candidates
+    .filter((c) => !isOfficeholderCandidate(c.title, office, place, canonicalPlace))
+    .map((c) => c.title);
+  if (rejected.length > 0) {
+    log.info("officeholder rejected", { rejected });
+  }
+
+  const validated = candidates
+    .filter((c) => isOfficeholderCandidate(c.title, office, place, canonicalPlace))
+    .sort(
+      (a, b) =>
+        scoreOfficeHit(b.title, office, placeForSearch) -
+        scoreOfficeHit(a.title, office, placeForSearch)
+    );
+  if (validated.length === 0) {
+    log.info("officeholder no validated candidate", {
+      canonicalQuery,
+      candidateTitles: candidates.map((c) => c.title),
+    });
+    return null;
+  }
+  log.info("officeholder validated candidates", { titles: validated.map((c) => c.title) });
+
+  for (const candidate of validated) {
+    const wikitext = await fetchWikipediaWikitext(candidate.title, timeoutMs, signal).catch(
+      () => null
+    );
+    const incumbent = wikitext ? extractIncumbentName(wikitext) : null;
+    if (incumbent) {
+      log.info("officeholder selected", { title: candidate.title, incumbent, source: "Wikipedia" });
+      return { title: candidate.title, incumbent };
+    }
+    log.info("officeholder rejected no incumbent", { title: candidate.title });
+  }
+  log.info("officeholder unverifiable", { validated: validated.map((c) => c.title) });
+  return null;
+}
+
 /**
  * Fallback knowledge search — the MediaWiki API with our own result ranking.
  * The Instant Answer API returns nothing for most general factual queries and
@@ -866,6 +1002,42 @@ async function searchKnowledgeFallback(
   timeoutMs: number,
   signal?: AbortSignal
 ): Promise<SearchResult | null> {
+  // Officeholder questions are answered ONLY from a validated office/place
+  // article's infobox incumbent — never from an arbitrary search hit, a
+  // generic lead, or a model guess. The raw question, the canonical
+  // "office + place" query and the exact canonical title are all discovery;
+  // every candidate must survive isOfficeholderCandidate before its infobox
+  // is read, and no incumbent means null (never a generic Wikipedia answer).
+  if (cls.kind === "officeholder") {
+    if (!cls.office || !cls.place) return null;
+    const article = await findValidatedOfficeholderArticle(
+      query,
+      cls.office,
+      cls.place,
+      cls.canonicalPlace ?? null,
+      timeoutMs,
+      signal
+    );
+    if (!article) return null;
+    const officeDisplay =
+      article.title.replace(/\s+of\s+.*$/i, "").trim() || capitalizeWords(cls.office);
+    const placeDisplayBase = displayPlace(cls.place);
+    const placeDisplay = /^[A-Z]{2,4}$/.test(placeDisplayBase)
+      ? `the ${placeDisplayBase}`
+      : placeDisplayBase;
+    const url = `https://en.wikipedia.org/wiki/${encodeURIComponent(article.title.replace(/ /g, "_"))}`;
+    return {
+      query,
+      heading: article.title,
+      abstract: null,
+      answer: `The current ${officeDisplay} of ${placeDisplay} is ${article.incumbent} (per Wikipedia).`,
+      source: "Wikipedia",
+      url,
+      topics: [{ text: article.title, url }],
+      engine: "Wikipedia",
+    };
+  }
+
   // Typo tolerance: if the raw question finds nothing (Wikipedia's full-text
   // search is strict — "prime misnister" returns zero hits), retry with the
   // content terms only, then with OpenSearch suggestions, whose autocomplete
@@ -881,7 +1053,7 @@ async function searchKnowledgeFallback(
   // Wikipedia can actually match.
   if (
     hits.length === 0 &&
-    (cls.kind === "rank-qualified" || cls.kind === "officeholder") &&
+    cls.kind === "rank-qualified" &&
     cls.office &&
     cls.place
   ) {
@@ -905,8 +1077,7 @@ async function searchKnowledgeFallback(
   const keywords = queryKeywords(query);
   const anchors = anchorOf(query) ? [anchorOf(query)!] : [];
   const nouns = properNounsOf(query);
-  const structuredOffice =
-    cls.kind === "rank-qualified" || cls.kind === "officeholder" ? cls.office : null;
+  const structuredOffice = cls.kind === "rank-qualified" ? cls.office : null;
   const ranked = [...hits].sort((a, b) => {
     if (parsed || officeLabel || structuredOffice) {
       // Use the parse (office only, place separate) when available; the bare
@@ -937,34 +1108,6 @@ async function searchKnowledgeFallback(
     if (topics.length >= 5) break;
   }
   const best = ranked[0];
-
-  // Officeholder questions: read the article's infobox incumbent directly so
-  // "who is the current prime minister of india" answers with the person —
-  // including the Hinglish shape ("india ka pradhan mantri kaun hai"), whose
-  // English-only parse is null but whose classification still carries the
-  // office and place. Rank-qualified questions ("who is the FIRST x of y" /
-  // "pehla … kaun tha") are excluded — their answer is never the current
-  // officeholder.
-  if ((parsed || cls.kind === "officeholder") && cls.kind !== "rank-qualified") {
-    const wikitext = await fetchWikipediaWikitext(best.title, timeoutMs, signal).catch(() => null);
-    const incumbent = wikitext ? extractIncumbentName(wikitext) : null;
-    if (incumbent) {
-      const office = parsed ? parsed.office : cls.office ?? "";
-      const place = parsed ? parsed.place : cls.place ?? "";
-      const officeDisplay =
-        best.title.replace(/\s+of\s+.*$/i, "").trim() || capitalizeWords(office);
-      return {
-        query,
-        heading: best.title,
-        abstract: null,
-        answer: `The current ${officeDisplay} of ${displayPlace(place)} is ${incumbent} (per Wikipedia).`,
-        source: "Wikipedia",
-        url: topics[0]?.url ?? null,
-        topics,
-        engine: "Wikipedia",
-      };
-    }
-  }
 
   // Capital questions: rank the place's own article first and read its infobox
   // `capital` field directly, so "what is the capital of india" answers "New
@@ -1084,14 +1227,22 @@ export async function webSearch(
 ): Promise<SearchResult | null> {
   const key = query.trim().toLowerCase();
   if (!key) return null;
+  // Classify BEFORE any cache read. A cached result created under an earlier,
+  // weaker implementation could otherwise bypass the current classification
+  // and its semantic gates — e.g. a stale generic Wikipedia page for what is
+  // now an officeholder question. Every cache hit is validated against the
+  // CURRENT classification; a hit that no longer holds is dropped and the
+  // fresh path is re-run (never served, never sent to the LLM).
+  const cls = classifyKnowledgeQuery(query);
   const hit = cached(searchCache, key);
-  if (hit) return hit;
+  if (hit) {
+    if (cachedResultValidFor(hit, cls, query)) return hit;
+    searchCache.delete(key);
+  }
   const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1&t=jarvis`;
 
   const isEmpty = (r: SearchResult | null): boolean =>
     !r || (!r.abstract && !r.answer && r.topics.length === 0);
-
-  const cls = classifyKnowledgeQuery(query);
 
   let result: SearchResult | null = null;
   let ddgError: unknown = null;
@@ -1175,13 +1326,11 @@ export async function webSearch(
   }
   if (isEmpty(result)) return null;
   if (!result) return null;
-  // Rank-qualified results must semantically support the requested
-  // relationship (rank + qualifier(s) + office + place) — an unrelated page is
-  // worse than no result. The fallback already enforces this internally; the
-  // gate here also guards the DuckDuckGo winner.
-  if (cls.kind === "rank-qualified" && !contentSupportsRankQualified(searchResultContent(result), cls)) {
-    return null;
-  }
+  // Only cache results that already passed the SAME relevance/authority
+  // validation the cache reads enforce — a stale, semantically invalid result
+  // must never be stored for later reuse. This also guards the DuckDuckGo
+  // winner for rank-qualified/generic and the fallback lead for generic.
+  if (!cachedResultValidFor(result, cls, query)) return null;
   searchCache.set(key, { value: result, at: Date.now() });
   return result;
 }
@@ -1229,6 +1378,19 @@ function contentMentionsPlace(content: string, place: string, canonical: string 
   if (raw.length >= 3 && contentHasWord(content, raw)) return true;
   if (canonical && contentHasWord(content, canonical)) return true;
   return false;
+}
+
+/**
+ * Whether the requested office appears in the answer content, tolerating a
+ * one-character typo. The infobox answer's office label comes from the article
+ * title, which resolves typos ("prime misnister" searches "Prime Minister
+ * (India)"), so the exact misspelled string must not be required.
+ */
+function contentHasOffice(content: string, office: string): boolean {
+  if (contentHasWord(content, office)) return true;
+  const tokens = office.split(/\s+/).filter((t) => t.length >= 3);
+  if (tokens.length === 0) return false;
+  return tokens.every((t) => tokenInTitle(t, content));
 }
 
 /**
@@ -1303,6 +1465,51 @@ function isSearchResultRelevant(result: SearchResult, cls: KnowledgeQuery, query
     return isContentfulResult(result) && genericResultMatchesTopic(result, query);
   }
   return isContentfulResult(result);
+}
+
+/**
+ * Whether a SearchResult is valid for the CURRENT query classification —
+ * enforced on every cache READ and, symmetrically, before every cache WRITE.
+ *
+ * A cached result created under an earlier, weaker implementation can bypass
+ * the current classification entirely: the old code stored a generic
+ * Wikipedia/DDG result for "India ka pradhan mantri kaun hai?" (an unrelated
+ * person's page) before the Hinglish officeholder parser existed, and served
+ * it forever. Classification now runs BEFORE any cache read, and a hit is
+ * only served when it satisfies the same semantic gate the fresh path uses:
+ *
+ * - officeholder: only an authoritative structured answer naming the office
+ *   and place is valid — a generic abstract, random person, DDG definition,
+ *   title-only topic or unrelated article is rejected.
+ * - capital: only an authoritative answer naming the requested place is valid.
+ * - rank-qualified: the result must semantically support the requested
+ *   relationship (existing contentSupportsRankQualified gate) — cached results
+ *   must not bypass it.
+ * - generic: the existing query-aware relevance gate.
+ */
+function cachedResultValidFor(
+  result: SearchResult,
+  cls: KnowledgeQuery,
+  query: string
+): boolean {
+  if (cls.kind === "rank-qualified") {
+    return contentSupportsRankQualified(searchResultContent(result), cls);
+  }
+  if (cls.kind === "generic") {
+    return isSearchResultRelevant(result, cls, query);
+  }
+  // officeholder / capital: the answer must be the authoritative structured
+  // infobox answer ("The current X of Y is …"), carrying the requested office
+  // and place. Anything else — a definition, an unrelated person, a title-only
+  // topic — is not a valid cached answer.
+  const answer = (result.answer ?? "").trim();
+  if (!answer) return false;
+  const content = answer.toLowerCase();
+  if (cls.place && !contentMentionsPlace(content, cls.place, cls.canonicalPlace ?? null)) {
+    return false;
+  }
+  if (cls.office && !contentHasOffice(content, cls.office)) return false;
+  return true;
 }
 
 export interface NewsItem {
