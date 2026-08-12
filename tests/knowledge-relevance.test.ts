@@ -287,9 +287,9 @@ describe("classifyKnowledgeQuery", () => {
     expect(cls.place).toBe("india");
   });
 
-  it("keeps past-tense and place-fact Hinglish questions generic", () => {
+  it("keeps past-tense Hinglish questions generic but routes the capital place-fact to capital", () => {
     expect(classifyKnowledgeQuery("India ka pradhan mantri kaun tha?").kind).toBe("generic");
-    expect(classifyKnowledgeQuery("Bharat ki rajdhani kya hai?").kind).toBe("generic");
+    expect(classifyKnowledgeQuery("Bharat ki rajdhani kya hai?").kind).toBe("capital");
   });
 
   it("detects capital questions with a canonical place", () => {

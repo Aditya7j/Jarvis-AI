@@ -431,21 +431,24 @@ describe("existing behavior is unchanged", () => {
     expect(result?.answer).toContain("New Delhi");
   });
 
-  it("Bharat ki rajdhani kya hai? stays on the existing generic path (capital behavior untouched)", async () => {
-    // This shape is intentionally generic in this system (a WHAT-question, not
-    // a structured capital query) — knowledge-relevance.test.ts locks that
-    // classification. The rank-qualified fix must not re-route it: the result
-    // is whatever the pre-existing generic gate produces (here an honest null,
-    // because the English source never carries the Hindi head noun "rajdhani").
-    expect(classifyKnowledgeQuery("Bharat ki rajdhani kya hai?").kind).toBe("generic");
-    expect(classifyKnowledgeQuery("Bharat ki rajdhani kya hai?").kind).not.toBe("rank-qualified");
+  it("Bharat ki rajdhani kya hai? is a capital question answered from the India infobox (New Delhi)", async () => {
+    // The Hinglish capital shape ("<place> ki rajdhani kya hai?") is classified
+    // capital (a WHAT place-fact, never rank-qualified), normalized to its
+    // canonical place ("bharat" -> "India") and answered from the India
+    // article's infobox `capital` field — the same authoritative path as the
+    // English "what is the capital of India?".
+    const cls = classifyKnowledgeQuery("Bharat ki rajdhani kya hai?");
+    expect(cls.kind).toBe("capital");
+    expect(cls.place).toBe("bharat");
+    expect(cls.canonicalPlace).toBe("India");
+    expect(cls.kind).not.toBe("rank-qualified");
     SEARCH_RESPONSES.set("search:bharat ki rajdhani kya hai", searchResult(["India"]));
-    SEARCH_RESPONSES.set(
-      "lead:India",
-      "India, officially the Republic of India, is a country in South Asia. Its capital is New Delhi."
-    );
+    SEARCH_RESPONSES.set("search:India", searchResult(["India"]));
+    SEARCH_RESPONSES.set("wt:India", INDIA_WIKITEXT);
     const result = await webSearch("Bharat ki rajdhani kya hai?");
-    expect(result).toBeNull();
+    expect(result?.answer).toContain("New Delhi");
+    expect(result?.answer).toContain("capital of India");
+    expect(result?.answer).not.toContain("Bharat");
   });
 
   it("the generic technical path is preserved (What is React?)", async () => {

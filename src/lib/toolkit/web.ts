@@ -4,10 +4,20 @@
  * and is cached so repeated questions never hit the network twice.
  */
 
-import { aiLogger } from "@/lib/ai/logger";
+import { aiLogger, type Logger } from "@/lib/ai/logger";
 import { getSystemClock } from "@/lib/time/time-service";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Wikipedia's MediaWiki API rejects requests without a descriptive
+ * User-Agent with HTTP 429. Node's default `fetch` sends none, which made
+ * every Wikipedia call fail with "Search service responded with 429." and
+ * silently killed the knowledge fallback. One UA header is sent on every
+ * outbound request (Wikipedia, DuckDuckGo, Frankfurter, Hacker News).
+ */
+const HTTP_USER_AGENT =
+  "JarvisAI/1.0 (personal assistant; knowledge retrieval; https://github.com/anomalyco/opencode)";
 
 const knowledgeLog = aiLogger.child("knowledge");
 
@@ -40,7 +50,13 @@ async function fetchWithTimeout(
   const onOuterAbort = () => controller.abort();
   signal?.addEventListener("abort", onOuterAbort, { once: true });
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": HTTP_USER_AGENT,
+        Accept: "application/json",
+      },
+    });
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", onOuterAbort);
@@ -822,16 +838,43 @@ async function fetchWikipediaWikitext(
   return data.query?.pages?.[0]?.revisions?.[0]?.slots?.main?.content ?? null;
 }
 
-/** Parse a "what is the capital of <place>?" question. */
+/**
+ * Parse a Hinglish capital question ("Bharat ki rajdhani kya hai?") into the
+ * same shape as the English "what is the capital of <place>?" — place only.
+ * Both the canonical order ("<place> ki rajdhani kya hai?") and the topicalized
+ * order ("kya hai <place> ki rajdhani?") are accepted. Only the WHAT
+ * interrogative ("kya hai/hain") matches — "kaun hai" (who) is a person
+ * question, never a capital fact. Returns null for anything else.
+ */
+export function parseHinglishCapitalQuestion(q: string): { place: string } | null {
+  const text = q.toLowerCase().trim();
+  const post = "(?:ka|ke|ki)";
+  const verb = "(?:hai|hain)";
+  const m = text.match(
+    new RegExp(`^(.+?)\\s+${post}\\s+rajdhani\\s+kya\\s+${verb}[?.!]?\\s*$`)
+  );
+  const mTop = !m
+    ? text.match(new RegExp(`^kya\\s+${verb}\\s+(.+?)\\s+${post}\\s+rajdhani[?.!]?\\s*$`))
+    : null;
+  if (!m && !mTop) return null;
+  const place = (m ? m[1] : mTop![1]).trim();
+  if (place.length < 2) return null;
+  if (/\b(?:you|this|that|it|there|mera|tera|aapka|tumhara)\b/.test(place)) return null;
+  return { place };
+}
+
+/** Parse a "what is the capital of <place>?" question (English or Hinglish). */
 export function parseCapitalQuestion(q: string): { place: string } | null {
-  const m = q
+  const english = q
     .toLowerCase()
     .trim()
     .match(/\bwhat\s+is\s+(?:the\s+)?capital\s+of\s+(.+?)\s*[?.]?\s*$/i);
-  if (!m) return null;
-  const place = m[1].trim();
-  if (place.length < 2 || /\b(?:you|this|that|it|there)\b/.test(place)) return null;
-  return { place };
+  if (english) {
+    const place = english[1].trim();
+    if (place.length < 2 || /\b(?:you|this|that|it|there)\b/.test(place)) return null;
+    return { place };
+  }
+  return parseHinglishCapitalQuestion(q);
 }
 
 /**
@@ -1232,6 +1275,155 @@ async function findRankQualifiedAnswer(
   return { ...chosen, candidates };
 }
 
+// ---------------------------------------------------------------------------
+// Capital retrieval — bounded discovery, NOT ranking.
+//
+// "What is the capital of X?" is about the PLACE: its own article carries the
+// infobox `capital` field. The raw question's Wikipedia hits ("Capital
+// punishment in India", "National Capital Region …") may not include the place
+// article, or include it at an arbitrary rank — so discovery ALWAYS searches
+// the raw question AND the canonical place article, merges and deduplicates
+// the titles, scores them with the existing capital scoring, prefers the exact
+// canonical article, and checks a bounded number of infoboxes for `capital`.
+// If search never surfaced the place article, the canonical title is fetched
+// directly through the existing MediaWiki API (redirects resolved). Discovery
+// never decides the answer: only an infobox `capital` field is accepted, and
+// null is returned honestly when no bounded strategy yields one.
+// ---------------------------------------------------------------------------
+
+/** Bounded number of candidates whose infobox may be read for a capital query. */
+const MAX_CAPITAL_CANDIDATES = 8;
+
+interface CapitalArticle {
+  title: string;
+  capital: string;
+}
+
+/** Read the `capital` infobox of each candidate in order; first hit wins. */
+async function readCapitalCandidates(
+  candidates: Array<{ title: string }>,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+  log: Logger
+): Promise<CapitalArticle | null> {
+  for (const candidate of candidates) {
+    const wikitext = await fetchWikipediaWikitext(candidate.title, timeoutMs, signal).catch((err) => {
+      log.warn("capital wikitext fetch failed", {
+        title: candidate.title,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    });
+    const capital = wikitext ? extractCapitalName(wikitext) : null;
+    log.info("capital candidate checked", {
+      title: candidate.title,
+      wikitextFetched: Boolean(wikitext),
+      capital,
+    });
+    if (capital) return { title: candidate.title, capital };
+  }
+  return null;
+}
+
+/**
+ * Bounded, rank-independent capital discovery. Searches the raw question and
+ * the canonical place ("India", "United States") in parallel, merges +
+ * deduplicates the hits, scores them with the existing capital scoring, moves
+ * the exact canonical article to the front when present, and reads the
+ * `capital` infobox of at most MAX_CAPITAL_CANDIDATES. When search never
+ * surfaced the canonical article, it is fetched directly by title. Failures at
+ * any stage are logged and degrade to an empty contribution; only an infobox
+ * `capital` field is accepted as the answer.
+ */
+async function findCapitalArticle(
+  query: string,
+  place: string,
+  canonicalPlace: string | null,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<CapitalArticle | null> {
+  const log = knowledgeLog.child("capital");
+  const placeForSearch = canonicalPlace ?? place;
+  const canonicalTitle = displayPlace(placeForSearch);
+  log.info("capital retrieval start", {
+    kind: "capital",
+    query,
+    place,
+    canonicalPlace,
+    placeForSearch,
+    canonicalTitle,
+  });
+
+  const rawHits = await searchWikipedia(query, timeoutMs, signal).catch((err) => {
+    log.warn("capital raw-query search failed", {
+      query,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [] as Array<{ title: string; snippet: string; pageid: number }>;
+  });
+  const placeHits = await searchWikipedia(placeForSearch, timeoutMs, signal).catch((err) => {
+    log.warn("capital canonical-place search failed", {
+      place: placeForSearch,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [] as Array<{ title: string; snippet: string; pageid: number }>;
+  });
+  log.info("capital discovery hits", {
+    rawQuery: query,
+    raw: rawHits.map((h) => h.title),
+    canonicalQuery: placeForSearch,
+    place: placeHits.map((h) => h.title),
+  });
+
+  const seen = new Set<string>();
+  const merged: Array<{ title: string; snippet: string; pageid: number }> = [];
+  for (const hit of [...rawHits, ...placeHits]) {
+    if (!hit.title || !hit.title.trim()) continue;
+    if (seen.has(hit.title)) continue;
+    seen.add(hit.title);
+    merged.push(hit);
+  }
+  const scored = [...merged].sort(
+    (a, b) => scoreCapitalHit(b.title, placeForSearch) - scoreCapitalHit(a.title, placeForSearch)
+  );
+  // Prefer the exact canonical place article: it is the one guaranteed to
+  // carry the requested place's `capital` infobox.
+  const exactIndex = scored.findIndex(
+    (c) => c.title.toLowerCase() === canonicalTitle.toLowerCase()
+  );
+  if (exactIndex > 0) {
+    const [exact] = scored.splice(exactIndex, 1);
+    scored.unshift(exact);
+  }
+  log.info("capital ranked candidates", { titles: scored.map((c) => c.title) });
+
+  const bounded = scored.slice(0, MAX_CAPITAL_CANDIDATES);
+  const found = await readCapitalCandidates(bounded, timeoutMs, signal, log);
+  if (found) {
+    log.info("capital selected", { title: found.title, capital: found.capital, source: "search discovery" });
+    return found;
+  }
+
+  // Search never surfaced (or never validated) the canonical article — fetch
+  // it directly through the existing MediaWiki API, which resolves redirects.
+  const direct = await readCapitalCandidates([{ title: canonicalTitle }], timeoutMs, signal, log);
+  if (direct) {
+    log.info("capital selected", {
+      title: direct.title,
+      capital: direct.capital,
+      source: "direct canonical lookup",
+    });
+    return direct;
+  }
+
+  log.info("capital unverifiable", {
+    checked: bounded.map((c) => c.title),
+    canonicalTitle,
+    exhausted: true,
+  });
+  return null;
+}
+
 /**
  * Fallback knowledge search — the MediaWiki API with our own result ranking.
  * The Instant Answer API returns nothing for most general factual queries and
@@ -1324,6 +1516,42 @@ async function searchKnowledgeFallback(
     };
   }
 
+  // Capital questions ("what is the capital of X?", "X ki rajdhani kya hai?")
+  // are answered ONLY from the place article's infobox `capital` field — never
+  // from an unrelated search snippet, "Capital punishment in X", a generic
+  // lead or a model guess. Bounded discovery searches the raw question AND the
+  // canonical place, merges + deduplicates + scores the candidates, prefers the
+  // exact canonical article and reads at most MAX_CAPITAL_CANDIDATES infoboxes;
+  // when search never surfaced the place article it is fetched directly. No
+  // capital field anywhere means null — honest unavailable.
+  if (cls.kind === "capital") {
+    if (!cls.place) return null;
+    const article = await findCapitalArticle(
+      query,
+      cls.place,
+      cls.canonicalPlace ?? null,
+      timeoutMs,
+      signal
+    );
+    if (!article) return null;
+    const place = cls.canonicalPlace ?? cls.place;
+    const placeDisplay =
+      place.toLowerCase() === "united states" || place.toLowerCase() === "united kingdom"
+        ? `the ${place}`
+        : displayPlace(place);
+    const url = `https://en.wikipedia.org/wiki/${encodeURIComponent(article.title.replace(/ /g, "_"))}`;
+    return {
+      query,
+      heading: article.title,
+      abstract: null,
+      answer: `The capital of ${placeDisplay} is ${article.capital} (per Wikipedia).`,
+      source: "Wikipedia",
+      url,
+      topics: [{ text: article.title, url }],
+      engine: "Wikipedia",
+    };
+  }
+
   // Typo tolerance: if the raw question finds nothing (Wikipedia's full-text
   // search is strict — "prime misnister" returns zero hits), retry with the
   // content terms only, then with OpenSearch suggestions, whose autocomplete
@@ -1347,7 +1575,6 @@ async function searchKnowledgeFallback(
 
   const parsed = parseOfficeQuestion(query);
   const officeLabel = officeLabelOf(query);
-  const capitalQuestion = parseCapitalQuestion(query);
   const keywords = queryKeywords(query);
   const anchors = anchorOf(query) ? [anchorOf(query)!] : [];
   const nouns = properNounsOf(query);
@@ -1358,12 +1585,6 @@ async function searchKnowledgeFallback(
       const office = parsed ? parsed.office : (officeLabel ?? "");
       const place = parsed?.place ?? cls.place ?? "";
       return scoreOfficeHit(b.title, office, place) - scoreOfficeHit(a.title, office, place);
-    }
-    if (capitalQuestion) {
-      return (
-        scoreCapitalHit(b.title, capitalQuestion.place) -
-        scoreCapitalHit(a.title, capitalQuestion.place)
-      );
     }
     return scoreTitle(b.title, keywords, anchors, nouns) - scoreTitle(a.title, keywords, anchors, nouns);
   });
@@ -1381,58 +1602,6 @@ async function searchKnowledgeFallback(
     if (topics.length >= 5) break;
   }
   const best = ranked[0];
-
-  // Capital questions: rank the place's own article first and read its infobox
-  // `capital` field directly, so "what is the capital of india" answers "New
-  // Delhi" instead of matching the keyword "capital" to "Capital punishment in
-  // India". If none of the ranked hits carries a `capital` infobox, search for
-  // the place itself — its own article is what carries it.
-  if (capitalQuestion) {
-    // Normalize aliases ("usa" → "United States") so the place's own article —
-    // the one carrying the `capital` infobox — is searched and scored under its
-    // real name, and the answer displays the real name, never the alias.
-    const place = canonicalPlaceOf(capitalQuestion.place) ?? capitalQuestion.place;
-    const sorted = [...ranked].sort(
-      (a, b) => scoreCapitalHit(b.title, place) - scoreCapitalHit(a.title, place)
-    );
-    const tryCapital = async (
-      hits: Array<{ title: string }>
-    ): Promise<{ title: string; capital: string } | null> => {
-      for (const hit of hits) {
-        const wikitext = await fetchWikipediaWikitext(hit.title, timeoutMs, signal).catch(() => null);
-        const capital = wikitext ? extractCapitalName(wikitext) : null;
-        if (capital) return { title: hit.title, capital };
-      }
-      return null;
-    };
-    let candidates = [...sorted];
-    let found = await tryCapital(candidates.slice(0, 4));
-    if (!found) {
-      const originalCount = candidates.length;
-      const placeHits = await searchWikipedia(place, timeoutMs, signal).catch(() => []);
-      for (const h of placeHits) {
-        if (!candidates.some((c) => c.title === h.title)) candidates.push(h);
-      }
-      found = await tryCapital(candidates.slice(originalCount));
-    }
-    if (found) {
-      const placeDisplay =
-        place.toLowerCase() === "united states" || place.toLowerCase() === "united kingdom"
-          ? `the ${place}`
-          : displayPlace(place);
-      return {
-        query,
-        heading: found.title,
-        abstract: null,
-        answer: `The capital of ${placeDisplay} is ${found.capital} (per Wikipedia).`,
-        source: "Wikipedia",
-        url: `https://en.wikipedia.org/wiki/${encodeURIComponent(found.title.replace(/ /g, "_"))}`,
-        topics,
-        engine: "Wikipedia",
-      };
-    }
-    // No article yielded a `capital` infobox — fall through to the lead path.
-  }
 
   // Generic questions: fetch the FULL lead of the best article — a real
   // paragraph, not a 200-char search fragment from an unrelated page. When the
@@ -1505,7 +1674,18 @@ export async function webSearch(
   // them; every other query (generic and rank-qualified) keeps the concurrent
   // race below.
   if (cls.kind === "officeholder" || cls.kind === "capital") {
-    result = await searchKnowledgeFallback(query, cls, timeoutMs, signal).catch(() => null);
+    result = await searchKnowledgeFallback(query, cls, timeoutMs, signal).catch((err) => {
+      // Never swallow the failure silently — the caller may still return an
+      // honest unavailable reply, but the log must identify WHICH stage broke
+      // (Wikipedia search, article fetch, parsing, extraction or validation).
+      knowledgeLog.error("knowledge fallback failed", {
+        kind: cls.kind,
+        query,
+        name: err instanceof Error ? err.name : undefined,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    });
   } else {
     // The Wikipedia fallback is independent of DuckDuckGo, and most factual
     // questions get no instant answer — start it concurrently so the fallback's
@@ -1515,7 +1695,15 @@ export async function webSearch(
     const onOuterAbort = () => fallbackController.abort();
     signal?.addEventListener("abort", onOuterAbort, { once: true });
     const fallbackPromise = searchKnowledgeFallback(query, cls, timeoutMs, fallbackController.signal)
-      .catch(() => null);
+      .catch((err) => {
+        knowledgeLog.error("knowledge fallback failed", {
+          kind: cls.kind,
+          query,
+          name: err instanceof Error ? err.name : undefined,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return null;
+      });
 
     try {
       const res = await fetchWithTimeout(url, timeoutMs, signal);
