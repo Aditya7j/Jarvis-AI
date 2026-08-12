@@ -989,6 +989,249 @@ export async function findValidatedOfficeholderArticle(
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Rank-qualified retrieval — bounded parallel discovery, NOT ranking.
+//
+// The old pipeline searched the RAW question and only ran the canonical
+// "office + place" discovery search when the raw question returned zero hits.
+// "Who was the first Sikh Prime Minister of India?" returns unrelated hits
+// (e.g. "Khalistan movement"), so hits.length > 0, the canonical discovery
+// was skipped, validation correctly rejected Khalistan, and the biography
+// (Manmohan Singh) was never discovered — null.
+//
+// Discovery now ALWAYS runs a small fixed set of queries derived from the
+// classified structure (raw, office+place, rank+office+place, qualifier forms
+// and the canonical article title) CONCURRENTLY, merges and deduplicates the
+// candidate titles, and only then runs the existing relationship validation.
+// Search ranking is discovery only — it never decides the answer.
+// ---------------------------------------------------------------------------
+
+/** Canonical article-oriented title for a rank-qualified office, e.g. "Sikh Prime Minister of India". */
+function rankQualifiedCanonicalTitle(rq: KnowledgeQuery): string {
+  const office = rq.office?.trim() ?? "";
+  const placeForTitle = rq.canonicalPlace ?? rq.place ?? "";
+  return `${capitalizeWords(office)} of ${displayPlace(placeForTitle)}`.trim();
+}
+
+/**
+ * The bounded stage-1 discovery query set for a rank-qualified question,
+ * derived entirely from the classified structure — never country-specific.
+ * Returns at most 5 deduplicated queries.
+ */
+export function buildRankQualifiedDiscoveryQueries(query: string, rq: KnowledgeQuery): string[] {
+  const rank = rq.rank ?? "";
+  const office = rq.office?.trim() ?? "";
+  const officeNoun = rq.officeNoun ?? "";
+  const qualifiers = rq.qualifiers ?? [];
+  const placeForSearch = rq.canonicalPlace ?? rq.place ?? "";
+  const raw = query.trim();
+
+  const queries = [
+    raw,
+    `${office} ${placeForSearch}`,
+    `${rank} ${office} ${placeForSearch}`,
+    `${qualifiers.join(" ")} ${officeNoun} ${placeForSearch}`,
+    rankQualifiedCanonicalTitle(rq),
+  ];
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const candidate of queries) {
+    const q = candidate.replace(/\s+/g, " ").trim();
+    if (!q) continue;
+    const key = q.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(q);
+  }
+  return out;
+}
+
+/**
+ * The bounded stage-2 discovery queries — the strongest semantic forms,
+ * used ONLY when stage-1 produced no validated candidate. Queries that are
+ * byte-identical to a stage-1 query are skipped (already searched).
+ */
+function buildRankQualifiedStageTwoQueries(rq: KnowledgeQuery, stageOne: string[]): string[] {
+  const rank = rq.rank ?? "";
+  const officeNoun = rq.officeNoun ?? "";
+  const qualifiers = rq.qualifiers ?? [];
+  const placeForSearch = rq.canonicalPlace ?? rq.place ?? "";
+  const stageOneKeys = new Set(stageOne.map((q) => q.toLowerCase()));
+
+  const candidates = [
+    `${qualifiers.join(" ")} ${officeNoun} ${placeForSearch}`,
+    `${rank} ${qualifiers.join(" ")} ${officeNoun} ${placeForSearch}`,
+  ];
+  const out: string[] = [];
+  for (const candidate of candidates) {
+    const q = candidate.replace(/\s+/g, " ").trim();
+    if (!q) continue;
+    const key = q.toLowerCase();
+    if (stageOneKeys.has(key)) continue;
+    stageOneKeys.add(key);
+    out.push(q);
+  }
+  return out;
+}
+
+/**
+ * Run the bounded discovery queries CONCURRENTLY and merge their hits,
+ * deduplicating by title. Failures degrade to an empty contribution; the
+ * bounded set (4–5 queries) keeps request count fixed regardless of input.
+ */
+async function discoverySearch(
+  queries: string[],
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<Array<{ title: string; snippet: string; pageid: number }>> {
+  const results = await Promise.all(
+    queries.map((query) => searchWikipedia(query, timeoutMs, signal).catch(() => []))
+  );
+  const seen = new Set<string>();
+  const merged: Array<{ title: string; snippet: string; pageid: number }> = [];
+  for (const hits of results) {
+    for (const hit of hits) {
+      if (!hit.title || !hit.title.trim()) continue;
+      if (seen.has(hit.title)) continue;
+      seen.add(hit.title);
+      merged.push(hit);
+    }
+  }
+  return merged;
+}
+
+interface RankQualifiedChosen {
+  title: string;
+  evidence: string;
+}
+
+/**
+ * Validate + walk rank-qualified candidates. Every candidate is filtered by
+ * isRankQualifiedPersonTitle, ordered by title score, then walked for the
+ * first whose lead PROVES the requested relationship via
+ * contentSupportsRankQualified + relationshipEvidence. `checkedTitles`
+ * prevents re-fetching leads already walked by an earlier stage.
+ */
+async function walkRankQualifiedCandidates(
+  candidates: Array<{ title: string; snippet: string; pageid: number }>,
+  rq: KnowledgeQuery,
+  checkedTitles: Set<string>,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<RankQualifiedChosen | null> {
+  const log = knowledgeLog.child("rank-qualified");
+  const office = rq.office ?? "";
+  const placeForSearch = rq.canonicalPlace ?? rq.place ?? "";
+
+  const titleRejected = candidates
+    .filter((c) => !isRankQualifiedPersonTitle(c.title))
+    .map((c) => c.title);
+  if (titleRejected.length > 0) {
+    log.info("rank-qualified title-rejected candidates", { rejected: titleRejected });
+  }
+
+  const persons = candidates
+    .filter((c) => isRankQualifiedPersonTitle(c.title))
+    .sort(
+      (a, b) =>
+        scoreOfficeHit(b.title, office, placeForSearch) -
+        scoreOfficeHit(a.title, office, placeForSearch)
+    );
+  if (persons.length === 0) {
+    log.info("rank-qualified no person candidates", {
+      candidates: candidates.map((c) => c.title),
+    });
+    return null;
+  }
+
+  const terms = rankQualifiedEvidenceTerms(rq);
+  for (const candidate of persons) {
+    if (checkedTitles.has(candidate.title)) continue;
+    checkedTitles.add(candidate.title);
+    const candidateLead = await fetchWikipediaLead(candidate.title, timeoutMs, signal).catch(
+      () => null
+    );
+    const supports = contentSupportsRankQualified((candidateLead ?? "").toLowerCase(), rq);
+    log.info("rank-qualified lead candidate", {
+      title: candidate.title,
+      relationshipSupported: supports,
+    });
+    if (!supports) continue;
+    const evidence = relationshipEvidence(candidateLead ?? "", terms, RANK_QUALIFIED_EVIDENCE_WINDOW);
+    if (evidence) {
+      log.info("rank-qualified selected", { title: candidate.title, evidence });
+      return { title: candidate.title, evidence };
+    }
+    log.info("rank-qualified relationship evidence absent", { title: candidate.title });
+  }
+  log.info("rank-qualified no validated candidate", { walked: [...checkedTitles] });
+  return null;
+}
+
+interface RankQualifiedAnswer {
+  title: string;
+  evidence: string;
+  candidates: Array<{ title: string; snippet: string; pageid: number }>;
+}
+
+/**
+ * Structured retrieval for rank-qualified questions ("who was the FIRST x of
+ * y?", "x ka pehla … kaun tha?"). Runs bounded concurrent discovery (stage 1),
+ * merges + deduplicates candidates, validates and walks them. Only when stage-1
+ * yields no validated relationship does a second bounded discovery (stage 2)
+ * run with the strongest semantic query forms; the SAME validation applies.
+ * Returns null only after every bounded discovery strategy is exhausted.
+ */
+async function findRankQualifiedAnswer(
+  query: string,
+  rq: KnowledgeQuery,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<RankQualifiedAnswer | null> {
+  const log = knowledgeLog.child("rank-qualified");
+  log.info("rank-qualified retrieval start", {
+    kind: "rank-qualified",
+    query,
+    rank: rq.rank,
+    office: rq.office,
+    officeNoun: rq.officeNoun,
+    qualifiers: rq.qualifiers,
+    place: rq.place,
+    canonicalPlace: rq.canonicalPlace,
+  });
+
+  const stageOneQueries = buildRankQualifiedDiscoveryQueries(query, rq);
+  log.info("rank-qualified discovery queries", { stageOneQueries });
+
+  let candidates = await discoverySearch(stageOneQueries, timeoutMs, signal);
+  log.info("rank-qualified discovery candidates", { titles: candidates.map((c) => c.title) });
+
+  const checkedTitles = new Set<string>();
+  let chosen = await walkRankQualifiedCandidates(candidates, rq, checkedTitles, timeoutMs, signal);
+
+  if (!chosen) {
+    const stageTwoQueries = buildRankQualifiedStageTwoQueries(rq, stageOneQueries);
+    if (stageTwoQueries.length > 0) {
+      log.info("rank-qualified stage-2 discovery queries", { stageTwoQueries });
+      const stageTwo = await discoverySearch(stageTwoQueries, timeoutMs, signal);
+      const fresh = stageTwo.filter((hit) => !candidates.some((c) => c.title === hit.title));
+      log.info("rank-qualified stage-2 discovery candidates", {
+        titles: fresh.map((c) => c.title),
+      });
+      candidates = candidates.concat(fresh);
+      chosen = await walkRankQualifiedCandidates(candidates, rq, checkedTitles, timeoutMs, signal);
+    }
+  }
+
+  if (!chosen) {
+    log.info("rank-qualified no trustworthy evidence", { query, exhausted: true });
+    return null;
+  }
+  log.info("rank-qualified final result", { query, title: chosen.title });
+  return { ...chosen, candidates };
+}
+
 /**
  * Fallback knowledge search — the MediaWiki API with our own result ranking.
  * The Instant Answer API returns nothing for most general factual queries and
@@ -1038,6 +1281,49 @@ async function searchKnowledgeFallback(
     };
   }
 
+  // Rank-qualified questions ("who was the FIRST x of y?", "x ka pehla … kaun
+  // tha?") run bounded CONCURRENT discovery — the raw question, the canonical
+  // office + place query, the rank + office + place query, the qualifier forms
+  // and the canonical article title are ALL searched in parallel, merged and
+  // deduplicated. Discovery never decides the answer: every candidate still
+  // passes isRankQualifiedPersonTitle + contentSupportsRankQualified and the
+  // proving sentence becomes the evidence. Only after both bounded discovery
+  // stages are exhausted may the result be null (honest unavailable).
+  if (cls.kind === "rank-qualified") {
+    const answer = await findRankQualifiedAnswer(query, cls, timeoutMs, signal);
+    if (!answer) return null;
+    const office = cls.office ?? "";
+    const placeForSearch = cls.canonicalPlace ?? cls.place ?? "";
+    const rankedCandidates = [...answer.candidates].sort(
+      (a, b) =>
+        scoreOfficeHit(b.title, office, placeForSearch) -
+        scoreOfficeHit(a.title, office, placeForSearch)
+    );
+    const topics: SearchResult["topics"] = [];
+    for (const hit of rankedCandidates) {
+      const text = cleanHtmlText(hit.snippet ?? "").slice(0, 200) || hit.title;
+      if (JUNK_SNIPPET_RE.test(text)) continue;
+      topics.push({
+        text,
+        url: hit.pageid
+          ? `https://en.wikipedia.org/?curid=${hit.pageid}`
+          : `https://en.wikipedia.org/wiki/${encodeURIComponent(hit.title.replace(/ /g, "_"))}`,
+      });
+      if (topics.length >= 5) break;
+    }
+    const url = `https://en.wikipedia.org/wiki/${encodeURIComponent(answer.title.replace(/ /g, "_"))}`;
+    return {
+      query,
+      heading: answer.title,
+      abstract: `${answer.title} — ${answer.evidence.slice(0, 600)}`,
+      answer: null,
+      source: "Wikipedia",
+      url,
+      topics,
+      engine: "Wikipedia",
+    };
+  }
+
   // Typo tolerance: if the raw question finds nothing (Wikipedia's full-text
   // search is strict — "prime misnister" returns zero hits), retry with the
   // content terms only, then with OpenSearch suggestions, whose autocomplete
@@ -1046,18 +1332,6 @@ async function searchKnowledgeFallback(
   if (hits.length === 0) {
     const terms = queryKeywords(query);
     if (terms.length) hits = await searchWikipedia(terms.join(" "), timeoutMs, signal);
-  }
-  // The Hinglish shape ("india ka pehla sikh prime minister kaun tha", "india
-  // ka pradhan mantri kaun hai") carries interrogative/particle noise; the
-  // office + place phrase is the discriminating English content terms
-  // Wikipedia can actually match.
-  if (
-    hits.length === 0 &&
-    cls.kind === "rank-qualified" &&
-    cls.office &&
-    cls.place
-  ) {
-    hits = await searchWikipedia(`${cls.office} ${cls.place}`, timeoutMs, signal).catch(() => []);
   }
   if (hits.length === 0) {
     const suggestions = await opensearchSuggest(query, timeoutMs, signal).catch(() => []);
@@ -1077,12 +1351,11 @@ async function searchKnowledgeFallback(
   const keywords = queryKeywords(query);
   const anchors = anchorOf(query) ? [anchorOf(query)!] : [];
   const nouns = properNounsOf(query);
-  const structuredOffice = cls.kind === "rank-qualified" ? cls.office : null;
   const ranked = [...hits].sort((a, b) => {
-    if (parsed || officeLabel || structuredOffice) {
+    if (parsed || officeLabel) {
       // Use the parse (office only, place separate) when available; the bare
       // office label is a greedy match that includes the place when present.
-      const office = parsed ? parsed.office : (structuredOffice ?? officeLabel ?? "");
+      const office = parsed ? parsed.office : (officeLabel ?? "");
       const place = parsed?.place ?? cls.place ?? "";
       return scoreOfficeHit(b.title, office, place) - scoreOfficeHit(a.title, office, place);
     }
@@ -1168,44 +1441,7 @@ async function searchKnowledgeFallback(
   let abstractTitle = best.title;
   let resultUrl: string | null = null;
   let lead: string | null = null;
-  if (cls.kind !== "rank-qualified") {
-    lead = await fetchWikipediaLead(best.title, timeoutMs, signal).catch(() => null);
-  }
-
-  // Rank-qualified officeholder questions ("who was the FIRST x of y?", "x ka
-  // pehla … kaun tha?") must never be answered from a page that doesn't
-  // semantically support the requested relationship — the office, the place,
-  // the rank AND the content qualifiers ("first Sikh prime minister of India").
-  // A page that only shares the office noun ("…Prime Minister of Punjab") or
-  // scatters the keywords across paragraphs (a movement article) is not the
-  // answer. Candidates are restricted to biographical articles and walked for
-  // the first whose lead PROVES the relationship; the proving sentence itself
-  // becomes the abstract so the answer identifies the person. If none proves
-  // it, return null so the caller defers rather than guessing.
-  if (cls.kind === "rank-qualified") {
-    const supports = (text: string | null) =>
-      Boolean(text && contentSupportsRankQualified(text.toLowerCase(), cls));
-    const terms = rankQualifiedEvidenceTerms(cls);
-    let chosen: { title: string; evidence: string } | null = null;
-    for (const hit of ranked) {
-      if (!isRankQualifiedPersonTitle(hit.title)) continue;
-      const candidateLead = await fetchWikipediaLead(hit.title, timeoutMs, signal).catch(() => null);
-      if (!supports(candidateLead)) continue;
-      const evidence = relationshipEvidence(
-        candidateLead ?? "",
-        terms,
-        RANK_QUALIFIED_EVIDENCE_WINDOW
-      );
-      if (evidence) {
-        chosen = { title: hit.title, evidence };
-        break;
-      }
-    }
-    if (!chosen) return null;
-    abstractTitle = chosen.title;
-    lead = chosen.evidence;
-    resultUrl = `https://en.wikipedia.org/wiki/${encodeURIComponent(chosen.title.replace(/ /g, "_"))}`;
-  }
+  lead = await fetchWikipediaLead(best.title, timeoutMs, signal).catch(() => null);
   const snippet = cleanHtmlText(best.snippet ?? "");
   if (!lead && snippet && JUNK_SNIPPET_RE.test(snippet)) {
     for (const hit of ranked.slice(1, 4)) {

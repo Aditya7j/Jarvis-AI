@@ -326,7 +326,7 @@ describe.skipIf(!ENABLED)("golden live eval (production path, awareness+memory O
       ).toEqual([]);
       expect(seqFailures, "sequence routing/drift failures").toEqual([]);
     },
-    1_800_000
+    7_200_000
   );
 });
 

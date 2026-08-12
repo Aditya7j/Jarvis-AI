@@ -37,7 +37,7 @@ const VISION_KEYWORDS = [
 ];
 
 const FAST_MODEL_PREFERENCE = [
-  "qwen3:1.8b",
+  "qwen3:1.7b",
   "qwen3:4b",
   "llama3.2:3b",
   "gemma3:4b",
