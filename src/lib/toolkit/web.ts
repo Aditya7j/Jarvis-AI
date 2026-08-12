@@ -13,11 +13,18 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
  * Wikipedia's MediaWiki API rejects requests without a descriptive
  * User-Agent with HTTP 429. Node's default `fetch` sends none, which made
  * every Wikipedia call fail with "Search service responded with 429." and
- * silently killed the knowledge fallback. One UA header is sent on every
- * outbound request (Wikipedia, DuckDuckGo, Frankfurter, Hacker News).
+ * silently killed the knowledge fallback. The UA is scoped to the Wikipedia
+ * endpoints only — unrelated services (Frankfurter, DuckDuckGo, Hacker News)
+ * are left on the plain, unchanged request path.
  */
 const HTTP_USER_AGENT =
   "JarvisAI/1.0 (personal assistant; knowledge retrieval; https://github.com/anomalyco/opencode)";
+
+/** MediaWiki API request headers — sent only on en.wikipedia.org calls. */
+const WIKIPEDIA_HEADERS: Record<string, string> = {
+  "User-Agent": HTTP_USER_AGENT,
+  Accept: "application/json",
+};
 
 const knowledgeLog = aiLogger.child("knowledge");
 
@@ -43,7 +50,8 @@ export class ToolkitNetworkError extends Error {
 async function fetchWithTimeout(
   url: string,
   timeoutMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  headers?: Record<string, string>
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -52,10 +60,7 @@ async function fetchWithTimeout(
   try {
     return await fetch(url, {
       signal: controller.signal,
-      headers: {
-        "User-Agent": HTTP_USER_AGENT,
-        Accept: "application/json",
-      },
+      ...(headers ? { headers } : {}),
     });
   } finally {
     clearTimeout(timer);
@@ -762,16 +767,22 @@ function capitalizeWords(text: string): string {
     .join(" ");
 }
 
-/** MediaWiki search hits, lowest level. */
+/**
+ * MediaWiki search hits, lowest level. The result limit is bounded and
+ * defaults to 5 for every caller; rank-qualified discovery passes a larger
+ * bounded limit so candidates below the generic top-5 (e.g. Manmohan Singh
+ * at ~rank 10 for "Sikh prime minister India") are still discovered.
+ */
 async function searchWikipedia(
   query: string,
   timeoutMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  limit = 5
 ): Promise<Array<{ title: string; snippet: string; pageid: number }>> {
   const url =
     `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=` +
-    `${encodeURIComponent(query)}&format=json&srlimit=5&utf8=1`;
-  const res = await fetchWithTimeout(url, timeoutMs, signal);
+    `${encodeURIComponent(query)}&format=json&srlimit=${limit}&utf8=1`;
+  const res = await fetchWithTimeout(url, timeoutMs, signal, WIKIPEDIA_HEADERS);
   if (!res.ok) throw new ToolkitNetworkError(`Search service responded with ${res.status}.`);
   const data = (await res.json()) as {
     query?: { search?: Array<{ title?: string; snippet?: string; pageid?: number }> };
@@ -795,7 +806,7 @@ async function opensearchSuggest(
   const url =
     `https://en.wikipedia.org/w/api.php?action=opensearch&search=` +
     `${encodeURIComponent(query)}&limit=5&redirects=resolve&format=json`;
-  const res = await fetchWithTimeout(url, timeoutMs, signal);
+  const res = await fetchWithTimeout(url, timeoutMs, signal, WIKIPEDIA_HEADERS);
   if (!res.ok) throw new ToolkitNetworkError(`Search service responded with ${res.status}.`);
   const data = (await res.json()) as unknown;
   if (Array.isArray(data) && Array.isArray(data[1])) {
@@ -813,7 +824,7 @@ async function fetchWikipediaLead(
   const url =
     `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro&explaintext&redirects=1` +
     `&format=json&formatversion=2&titles=${encodeURIComponent(title)}`;
-  const res = await fetchWithTimeout(url, timeoutMs, signal);
+  const res = await fetchWithTimeout(url, timeoutMs, signal, WIKIPEDIA_HEADERS);
   if (!res.ok) return null;
   const data = (await res.json()) as {
     query?: { pages?: Array<{ extract?: string }> };
@@ -830,7 +841,7 @@ async function fetchWikipediaWikitext(
   const url =
     `https://en.wikipedia.org/w/api.php?action=query&prop=revisions&rvprop=content&rvslots=main&redirects=1` +
     `&format=json&formatversion=2&titles=${encodeURIComponent(title)}`;
-  const res = await fetchWithTimeout(url, timeoutMs, signal);
+  const res = await fetchWithTimeout(url, timeoutMs, signal, WIKIPEDIA_HEADERS);
   if (!res.ok) return null;
   const data = (await res.json()) as {
     query?: { pages?: Array<{ revisions?: Array<{ slots?: { main?: { content?: string } } }> }> };
@@ -1120,16 +1131,23 @@ function buildRankQualifiedStageTwoQueries(rq: KnowledgeQuery, stageOne: string[
 
 /**
  * Run the bounded discovery queries CONCURRENTLY and merge their hits,
- * deduplicating by title. Failures degrade to an empty contribution; the
- * bounded set (4–5 queries) keeps request count fixed regardless of input.
+ * deduplicating by title, then cap the merged set at
+ * MAX_RANK_QUALIFIED_CANDIDATES. The per-query `limit` bounds each semantic
+ * search (10 for rank-qualified); the merged cap is deterministic (query
+ * order) and never exceeds the total candidate bound. Failures degrade to an
+ * empty contribution; the bounded query set keeps request count fixed.
  */
+const MAX_RANK_QUALIFIED_CANDIDATES = 20;
+const RANK_QUALIFIED_DISCOVERY_LIMIT = 10;
+
 async function discoverySearch(
   queries: string[],
   timeoutMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  limit = 5
 ): Promise<Array<{ title: string; snippet: string; pageid: number }>> {
   const results = await Promise.all(
-    queries.map((query) => searchWikipedia(query, timeoutMs, signal).catch(() => []))
+    queries.map((query) => searchWikipedia(query, timeoutMs, signal, limit).catch(() => []))
   );
   const seen = new Set<string>();
   const merged: Array<{ title: string; snippet: string; pageid: number }> = [];
@@ -1139,7 +1157,9 @@ async function discoverySearch(
       if (seen.has(hit.title)) continue;
       seen.add(hit.title);
       merged.push(hit);
+      if (merged.length >= MAX_RANK_QUALIFIED_CANDIDATES) break;
     }
+    if (merged.length >= MAX_RANK_QUALIFIED_CANDIDATES) break;
   }
   return merged;
 }
@@ -1247,7 +1267,12 @@ async function findRankQualifiedAnswer(
   const stageOneQueries = buildRankQualifiedDiscoveryQueries(query, rq);
   log.info("rank-qualified discovery queries", { stageOneQueries });
 
-  let candidates = await discoverySearch(stageOneQueries, timeoutMs, signal);
+  let candidates = await discoverySearch(
+    stageOneQueries,
+    timeoutMs,
+    signal,
+    RANK_QUALIFIED_DISCOVERY_LIMIT
+  );
   log.info("rank-qualified discovery candidates", { titles: candidates.map((c) => c.title) });
 
   const checkedTitles = new Set<string>();
@@ -1257,12 +1282,22 @@ async function findRankQualifiedAnswer(
     const stageTwoQueries = buildRankQualifiedStageTwoQueries(rq, stageOneQueries);
     if (stageTwoQueries.length > 0) {
       log.info("rank-qualified stage-2 discovery queries", { stageTwoQueries });
-      const stageTwo = await discoverySearch(stageTwoQueries, timeoutMs, signal);
+      const stageTwo = await discoverySearch(
+        stageTwoQueries,
+        timeoutMs,
+        signal,
+        RANK_QUALIFIED_DISCOVERY_LIMIT
+      );
       const fresh = stageTwo.filter((hit) => !candidates.some((c) => c.title === hit.title));
       log.info("rank-qualified stage-2 discovery candidates", {
         titles: fresh.map((c) => c.title),
       });
-      candidates = candidates.concat(fresh);
+      // Keep total discovery bounded at MAX_RANK_QUALIFIED_CANDIDATES across
+      // both stages. Fresh stage-2 titles are the ones not yet validated, so
+      // they are preserved first; already-walked stage-1 titles are skipped by
+      // the walk anyway.
+      const prior = candidates;
+      candidates = fresh.concat(prior).slice(0, MAX_RANK_QUALIFIED_CANDIDATES);
       chosen = await walkRankQualifiedCandidates(candidates, rq, checkedTitles, timeoutMs, signal);
     }
   }

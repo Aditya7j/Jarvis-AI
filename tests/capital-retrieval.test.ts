@@ -8,8 +8,9 @@
  * fallback swallowed silently into null.
  *
  * The fix locks in:
- * 1. Every outbound request carries a descriptive User-Agent (Wikipedia no
- *    longer 429s the retrieval path).
+ * 1. Every Wikipedia MediaWiki API request carries a descriptive User-Agent
+ *    (Wikipedia no longer 429s the retrieval path). Unrelated services
+ *    (Frankfurter, DuckDuckGo, Hacker News) are left on the plain request path.
  * 2. Capital discovery ALWAYS searches the raw question AND the canonical
  *    place article, merges + deduplicates + scores the candidates, prefers
  *    the exact canonical article and reads a BOUNDED number (max 8) of
@@ -104,13 +105,6 @@ function searchResult(titles: string[]): unknown {
   };
 }
 
-function fetchInits(): Array<Record<string, unknown>> {
-  const fn = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-  return (fn.mock.calls as Array<[RequestInfo | URL, unknown]>).map(([, init]) =>
-    (init as Record<string, unknown>) ?? {}
-  );
-}
-
 const INDIA_WIKITEXT = "{{Infobox country\n| capital = [[New Delhi]]\n| largest_city = Mumbai\n}}";
 const US_WIKITEXT =
   "{{Infobox country\n| capital = [[Washington, D.C.]]\n| largest_city = New York City\n}}";
@@ -127,17 +121,53 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("root cause: outbound requests carry a User-Agent (Wikipedia 429)", () => {
-  it("sends a descriptive User-Agent header on the Wikipedia search", async () => {
+describe("root cause: Wikipedia requests carry a User-Agent (MediaWiki 429)", () => {
+  function fetchCalls(): Array<[RequestInfo | URL, unknown]> {
+    return (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock
+      .calls as Array<[RequestInfo | URL, unknown]>;
+  }
+
+  function userAgentOf(init: unknown): string | null {
+    const headers = (init as Record<string, unknown> | undefined)?.["headers"] as
+      | Record<string, unknown>
+      | undefined;
+    const ua = headers?.["User-Agent"];
+    return typeof ua === "string" && ua.length > 0 ? ua : null;
+  }
+
+  it("sends a descriptive User-Agent on the real Wikipedia search request", async () => {
     SEARCH_RESPONSES.set("search:what is the capital of india", searchResult(["India"]));
     SEARCH_RESPONSES.set("wt:India", INDIA_WIKITEXT);
     const result = await webSearch("What is the capital of India?");
     expect(result?.answer).toContain("New Delhi");
-    const uas = fetchInits()
-      .map((init) => (init.headers as Record<string, unknown> | undefined)?.["User-Agent"])
-      .filter((ua) => typeof ua === "string" && ua.length > 0);
-    expect(uas.length).toBeGreaterThan(0);
-    expect(uas[0]).toContain("JarvisAI");
+    const wikiSearch = fetchCalls().find(([input]) => {
+      const s = String(input);
+      return s.includes("en.wikipedia.org") && s.includes("list=search");
+    });
+    expect(wikiSearch).toBeDefined();
+    const ua = userAgentOf(wikiSearch?.[1]);
+    expect(ua).not.toBeNull();
+    expect(ua).toMatch(/JarvisAI\/1\.0/);
+    expect(ua).toContain("knowledge retrieval");
+  });
+
+  it("sends a descriptive User-Agent on the direct canonical lookup", async () => {
+    SEARCH_RESPONSES.set("search:what is the capital of freedonia", searchResult([]));
+    SEARCH_RESPONSES.set("search:freedonia", searchResult([]));
+    SEARCH_RESPONSES.set(
+      "wt:Freedonia",
+      "{{Infobox country\n| capital = [[Freedonia City]]\n}}"
+    );
+    const result = await webSearch("What is the capital of Freedonia?");
+    expect(result?.answer).toContain("Freedonia City");
+    const directFetch = fetchCalls().find(([input]) => {
+      const s = String(input);
+      return s.includes("en.wikipedia.org") && s.includes("prop=revisions") && s.includes("titles=Freedonia");
+    });
+    expect(directFetch).toBeDefined();
+    const ua = userAgentOf(directFetch?.[1]);
+    expect(ua).not.toBeNull();
+    expect(ua).toMatch(/JarvisAI\/1\.0/);
   });
 });
 

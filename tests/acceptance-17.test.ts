@@ -103,32 +103,39 @@ describe("acceptance — 17-query routing & answer contract", () => {
     vi.useRealTimers();
   });
 
-  it.each(CASES.map((c) => [c.q, c]))("%s", async (q: string, c: AcceptanceCase) => {
-    vi.setSystemTime(new Date("2026-08-06T12:34:56.000Z"));
-    const events = await collect(c.q, fakeModel(["never"]));
-    const plan = planOf(events);
-    expect(plan?.intent, `intent for "${c.q}"`).toBe(c.cls);
+  // Live web_search cases make bounded concurrent Wikipedia discovery
+  // (rank-qualified uses srlimit=10), which legitimately takes >5s — give the
+  // live tool calls time to complete; the assertions are routing-only.
+  it.each(CASES.map((c) => [c.q, c]))(
+    "%s",
+    async (q: string, c: AcceptanceCase) => {
+      vi.setSystemTime(new Date("2026-08-06T12:34:56.000Z"));
+      const events = await collect(c.q, fakeModel(["never"]));
+      const plan = planOf(events);
+      expect(plan?.intent, `intent for "${c.q}"`).toBe(c.cls);
 
-    if (c.tokens !== undefined) {
-      expect(tokensOf(events)).toBe(c.tokens);
-      // Exactly one token: the deterministic answer. The model never ran.
-      expect(events.filter((e) => e.kind === "token").length).toBe(1);
-      expect(tokensOf(events)).not.toContain("never");
-    }
+      if (c.tokens !== undefined) {
+        expect(tokensOf(events)).toBe(c.tokens);
+        // Exactly one token: the deterministic answer. The model never ran.
+        expect(events.filter((e) => e.kind === "token").length).toBe(1);
+        expect(tokensOf(events)).not.toContain("never");
+      }
 
-    if (c.tool !== undefined) {
-      const tool = toolOf(events);
-      expect(tool?.tool).toBe(c.tool);
-      expect(memoryStub.listEntries).not.toHaveBeenCalled();
-      expect(memoryStub.createEntry).not.toHaveBeenCalled();
-    }
+      if (c.tool !== undefined) {
+        const tool = toolOf(events);
+        expect(tool?.tool).toBe(c.tool);
+        expect(memoryStub.listEntries).not.toHaveBeenCalled();
+        expect(memoryStub.createEntry).not.toHaveBeenCalled();
+      }
 
-    if (c.cls === "reasoning") {
-      // The reasoning model answers; no tool must run.
-      expect(tokensOf(events)).toBe("never");
-      expect(toolOf(events)).toBeUndefined();
-    }
-  });
+      if (c.cls === "reasoning") {
+        // The reasoning model answers; no tool must run.
+        expect(tokensOf(events)).toBe("never");
+        expect(toolOf(events)).toBeUndefined();
+      }
+    },
+    20_000
+  );
 
   it("answers the current-date query with the verified clock", async () => {
     vi.setSystemTime(new Date("2026-08-06T12:34:56.000Z"));
@@ -142,5 +149,5 @@ describe("acceptance — 17-query routing & answer contract", () => {
     const events = await collect("Who is the current Prime Minister of India?", fakeModel(["never"]));
     expect(planOf(events)?.intent).toBe("search");
     expect(toolOf(events)?.tool).toBe("web_search");
-  });
+  }, 20_000);
 });
