@@ -276,7 +276,13 @@ export function parseOfficeQuestion(q: string): { office: string; place: string 
     .trim()
     .match(/\bwho\s+is\s+(?:the\s+)?(?:current\s+)?(.+?)\s+of\s+(.+?)\s*[?.!]?\s*$/i);
   if (!m) return null;
-  const office = m[1].trim();
+  // Expand abbreviated and Hinglish office phrases ("PM", "CM", "pradhan
+  // mantri") to the canonical English phrase BEFORE the length guard — the
+  // same expansion the Hinglish parser applies — so "who is the current PM
+  // of India?" routes to the officeholder path instead of falling through to
+  // the generic Wikipedia ranking (where the wrong office-adjacent article
+  // could win).
+  const office = expandHinglishOffice(m[1].trim());
   const place = m[2].trim();
   if (office.length < 3 || place.length < 2) return null;
   if (/\b(?:you|this|that|it|there)\b/.test(place)) return null;
@@ -289,7 +295,10 @@ export function officeLabelOf(q: string): string | null {
     .toLowerCase()
     .trim()
     .match(/\bwho\s+is\s+(?:the\s+)?(?:current\s+)?(.+?)\s*[?.]?\s*$/i);
-  return m ? m[1].trim() : null;
+  // Expand abbreviated office phrases so the generic path scores and the
+  // follow-up enrichment matches the canonical English phrase ("pm" → "prime
+  // minister") instead of a 2-letter token that office matching ignores.
+  return m ? expandHinglishOffice(m[1].trim()) : null;
 }
 
 /** Trailing noun phrase after the last "of", e.g. "what is the capital of france?" → "france". */
@@ -430,6 +439,7 @@ const HINGLISH_OFFICE_EXPANSIONS: Record<string, string> = {
   uprashtrapati: "vice president",
   pm: "prime minister",
   cm: "chief minister",
+  vp: "vice president",
 };
 
 /** Expand a Hinglish/Hindi office phrase to the English phrase article content uses. */
