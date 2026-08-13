@@ -18,9 +18,10 @@ import {
   findUnit,
 } from "@/lib/toolkit/convert";
 import {
+  FACT_LOOKUP_TERMS,
   normalizeCurrency,
   parseCurrencyRequest,
-} from "@/lib/toolkit/web";
+} from "@/lib/toolkit/query-normalize";
 import { extractDateTokens } from "@/lib/time/date-calc";
 import { parseMathProblem } from "@/lib/toolkit/math";
 
@@ -236,7 +237,12 @@ const KNOWLEDGE_PHRASING: RegExp[] = [
   // Hinglish "who/what" fact lookups ("India ka pehla Sikh Prime Minister
   // kaun tha?"). The factual noun must precede the Hinglish interrogative so
   // definitional "kya hai" questions ("React kya hai?") stay on reasoning.
-  /\b(?:prime\s+minister|president|capital|population|history|founded|invented|discovered|highest|largest|tallest|winner|champion|rajdhani|rashtrapati|pradhan\s+mantri)\b[^.,!?]{0,60}\b(?:kaun|kis|konsa|kiska|kiski)\s+(?:hai|tha|thi|hain|the)\b/i,
+  // The noun vocabulary is the shared FACT_LOOKUP_TERMS the web toolkit's
+  // parsers use, so the planner and the parsers agree on one list.
+  new RegExp(
+    `\\b(?:${FACT_LOOKUP_TERMS.join("|")})\\b[^.,!?]{0,60}\\b(?:kaun|kis|konsa|kiska|kiski)\\s+(?:hai|tha|thi|hain|the)\\b`,
+    "i"
+  ),
 ];
 
 const KNOWLEDGE_EXCLUSIONS: RegExp[] = [
