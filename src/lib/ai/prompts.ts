@@ -1,3 +1,5 @@
+import { HELD_MAIN_CONFIDENCE } from "@/lib/vision/hold-grounding";
+
 export const DEFAULT_SYSTEM_PROMPT = `You are JARVIS, an operating system assistant. Behave like an OS: fast, minimal, accurate.
 
 Rules (STRICT):
@@ -166,12 +168,19 @@ Anti-hallucination rules (STRICT):
 
 /**
  * Focused holding prompt augmented with the detector's hand-region evidence for
- * this exact frame. The VLM is only allowed to name objects the detector
- * actually observed near the person's hands — the detector is the grounding
- * source and the VLM must not move desk/background objects into the hand.
+ * this exact frame. The prompt's strictness mirrors the grounding tier:
+ *   - NO evidence       -> the detector cannot see everyday items; a clearly
+ *                          visible off-vocabulary object may be named.
+ *   - WEAK evidence     -> all observed labels are below HELD_MAIN_CONFIDENCE,
+ *                          i.e. likely false positives (earphones misdetected
+ *                          as "remote" at 0.32). The VLM may correct them with
+ *                          a clearly-seen object but must never confirm a guess
+ *                          it cannot actually see.
+ *   - STRONG evidence   -> the detector is confident; the VLM may only name
+ *                          what the detector observed near the hands.
  */
 export function buildFocusedHoldingPrompt(
-  evidence: { labels: Set<string> } | null
+  evidence: { labels: Set<string>; labelConfidence?: Map<string, number> } | null
 ): string {
   if (!evidence || evidence.labels.size === 0) {
     return `${VISION_HOLDING_PROMPT}
@@ -179,13 +188,35 @@ export function buildFocusedHoldingPrompt(
 Detector note (STRICT): the object detector found NO objects near the person's hands in this frame. The detector only recognizes a fixed list of common objects — it cannot see everyday items like a pen, keys, earbuds, glasses or a wallet. If you can CLEARLY see such an object held in a visible hand, name it exactly. Otherwise "held" must be null and "certain" must be false.`;
   }
   const observed = [...evidence.labels].join(", ");
-  return `${VISION_HOLDING_PROMPT}
+  if (hasStrongEvidence(evidence)) {
+    return `${VISION_HOLDING_PROMPT}
 
 Detector observations for the person's hand region in this exact frame: ${observed}.
 Additional STRICT rules:
 - "held" must be one of the detector-observed objects listed above, or null.
 - Never name an object that is not in the detector observations, even if it looks plausible.
 - If the detector-observed objects are not actually in the person's hand (they may sit on a desk or in the background), set "held" to null — never move them into the hand.`;
+  }
+  return `${VISION_HOLDING_PROMPT}
+
+Detector observations for the person's hand region in this exact frame (LOW confidence — these may be false positives): ${observed}.
+Additional rules:
+- These detector observations are uncertain, so do NOT blindly confirm them.
+- If you can clearly see one of them actually held in the person's hand, name it.
+- If you can CLEARLY see a DIFFERENT object held in the person's hand — including everyday items the detector cannot recognize (pen, keys, earbuds, glasses) — name that object instead.
+- Never name an object you cannot clearly see held in a hand. If nothing is clearly held, set "held" to null and "certain" to false.`;
+}
+
+/** True when any observed label meets the detector-trust confidence floor. */
+function hasStrongEvidence(
+  evidence: { labels: Set<string>; labelConfidence?: Map<string, number> }
+): boolean {
+  if (!evidence.labelConfidence) return true;
+  for (const label of evidence.labels) {
+    const confidence = evidence.labelConfidence.get(label);
+    if (confidence === undefined || confidence >= HELD_MAIN_CONFIDENCE) return true;
+  }
+  return false;
 }
 
 /**

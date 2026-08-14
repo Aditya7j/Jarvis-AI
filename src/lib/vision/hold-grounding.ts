@@ -27,12 +27,16 @@ import { COCO_CLASSES, SMALL_OBJECT_CLASSES } from "./detect/coco-classes";
  *
  * Second, lower-confidence tier ("vlm-only"): the detector only knows a fixed
  * COCO vocabulary, so it can never see everyday items like pens, keys, earbuds
- * or glasses. When the detector has NO hand-region evidence at all, a CERTAIN,
- * specifically-reasoned VLM answer naming a plausible off-vocabulary object is
- * accepted with an explicit hedge ("It looks like you're holding...") instead
- * of being auto-rejected. A COCO-class label is never admitted through this
- * tier — it must be detector-grounded, which keeps the "notebook that was never
- * detected" hallucination path closed.
+ * or glasses. When the detector has NO CONFIDENT hand-region evidence — nothing
+ * at all, or only weak (< HELD_MAIN_CONFIDENCE) candidate labels that are
+ * likely false positives (e.g. earphones misdetected as "remote" at 0.32) — a
+ * CERTAIN, specifically-reasoned VLM answer naming a plausible off-vocabulary
+ * object is accepted with an explicit hedge ("It looks like you're holding...")
+ * instead of being auto-rejected. A COCO-class label is never admitted through
+ * this tier — it must be detector-grounded, which keeps the "notebook that was
+ * never detected" hallucination path closed. Strong detector evidence
+ * (>= HELD_MAIN_CONFIDENCE) still hard-blocks this tier: a confident detector
+ * observation is never overruled by the VLM.
  */
 
 export interface HeldCandidate {
@@ -86,6 +90,12 @@ export const HELD_DESK_STRIP_FRACTION = 0.85;
 export interface HeldObjectEvidence {
   /** COCO labels the detector observed in the hand region this frame. */
   labels: Set<string>;
+  /**
+   * Per-label detector confidence (the max across the frame's candidates for
+   * each label). Absent for legacy/manual evidence objects — those are treated
+   * as STRONG so the original conservative gating is preserved.
+   */
+  labelConfidence?: Map<string, number>;
   /** Person's hand region in frame pixels (null when no person is tracked). */
   region: { x: number; y: number; width: number; height: number } | null;
   hasPerson: boolean;
@@ -279,6 +289,8 @@ export interface HeldVlmVerdict {
   accepted: boolean;
   canonical: string | null;
   tier: GroundingTier | null;
+  /** Why this verdict was reached — for the proof log and diagnostics. */
+  reason: string;
 }
 
 /**
@@ -352,16 +364,37 @@ export function reasoningIsSpecific(reasoning: string): boolean {
 }
 
 /**
+ * True when the hand-region evidence contains at least one label the detector
+ * is confident enough about (>= HELD_MAIN_CONFIDENCE) to trust on its own.
+ * Strong evidence vetoes the vlm-only tier. A weak, sub-HELD_MAIN_CONFIDENCE
+ * detection ("remote" at 0.32 that is really earphones) is a false-positive
+ * candidate and must NOT veto a certain, specifically-reasoned VLM answer for
+ * an off-vocabulary object. When per-label confidence is unknown (legacy/manual
+ * evidence) any present label is treated as strong — the original behaviour.
+ */
+function evidenceHasStrongLabels(evidence: HeldObjectEvidence): boolean {
+  if (!evidence.labelConfidence) return evidence.labels.size > 0;
+  for (const label of evidence.labels) {
+    const confidence = evidence.labelConfidence.get(label);
+    if (confidence === undefined || confidence >= HELD_MAIN_CONFIDENCE) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Two-tier grounding for a focused VLM "held" answer:
  *
  *   - "detector": the VLM label normalizes to a COCO class. It is accepted ONLY
  *     when the detector observed that class in the hand region of the same
  *     frame (identical to `groundHeldVlmResult`). Everything else is rejected.
  *   - "vlm-only": the label does not normalize to any COCO class (off-vocabulary
- *     — pen, keys, earbuds, ...). It is accepted ONLY when the detector has NO
- *     hand-region evidence at all, a person is tracked, the VLM is certain, its
- *     reasoning is specific, and the label is plausible. Accepted verdicts from
- *     this tier must be reported with an explicit hedge.
+ *     — pen, keys, earbuds, ...). It is accepted ONLY when the detector has no
+ *     STRONG hand-region evidence (none at all, or only weak < HELD_MAIN_CONFIDENCE
+ *     candidate labels), a person is tracked, the VLM is certain, its reasoning
+ *     is specific, and the label is plausible. Accepted verdicts from this tier
+ *     must be reported with an explicit hedge.
  */
 export function groundHeldVlmTiered(
   vlmLabel: string | null,
@@ -369,28 +402,42 @@ export function groundHeldVlmTiered(
   reasoning: string,
   evidence: HeldObjectEvidence | null
 ): HeldVlmVerdict {
-  if (!vlmLabel) return { accepted: false, canonical: null, tier: null };
+  if (!vlmLabel) return { accepted: false, canonical: null, tier: null, reason: "no VLM label" };
   const canonical = normalizeObjectAlias(vlmLabel);
   if (canonical) {
     if (!evidence || !evidence.hasPerson) {
-      return { accepted: false, canonical, tier: null };
+      return { accepted: false, canonical, tier: null, reason: "no person tracked" };
     }
-    if (evidence.labels.size === 0) return { accepted: false, canonical, tier: null };
+    if (evidence.labels.size === 0) {
+      return { accepted: false, canonical, tier: null, reason: "label not observed by detector" };
+    }
     if (evidence.labels.has(canonical)) {
-      return { accepted: true, canonical, tier: "detector" };
+      return { accepted: true, canonical, tier: "detector", reason: "detector evidence" };
     }
-    return { accepted: false, canonical, tier: null };
+    return { accepted: false, canonical, tier: null, reason: "label not observed by detector" };
   }
   if (!evidence || !evidence.hasPerson) {
-    return { accepted: false, canonical: null, tier: null };
+    return { accepted: false, canonical: null, tier: null, reason: "no person tracked" };
   }
-  if (evidence.labels.size > 0) return { accepted: false, canonical: null, tier: null };
-  if (!certain) return { accepted: false, canonical: null, tier: null };
+  if (evidenceHasStrongLabels(evidence)) {
+    return { accepted: false, canonical: null, tier: null, reason: "blocked by strong detector evidence" };
+  }
+  if (!certain) {
+    return { accepted: false, canonical: null, tier: null, reason: "blocked by no VLM certainty" };
+  }
   if (!reasoningIsSpecific(reasoning)) {
-    return { accepted: false, canonical: null, tier: null };
+    return { accepted: false, canonical: null, tier: null, reason: "blocked by non-specific reasoning" };
   }
   if (!plausibleHeldLabel(vlmLabel)) {
-    return { accepted: false, canonical: null, tier: null };
+    return { accepted: false, canonical: null, tier: null, reason: "label not plausible" };
   }
-  return { accepted: true, canonical: null, tier: "vlm-only" };
+  return {
+    accepted: true,
+    canonical: null,
+    tier: "vlm-only",
+    reason:
+      evidence.labels.size > 0
+        ? "vlm-only, weak conflicting evidence"
+        : "vlm-only, no detector evidence",
+  };
 }

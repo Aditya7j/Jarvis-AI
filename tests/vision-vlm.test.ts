@@ -446,3 +446,160 @@ describe("focused wearing — garment type is reported, never hardcoded 'shirt'"
     }
   });
 });
+
+describe("fast cache path — weak detector guesses are never reported directly", () => {
+  const EARPHONES_JSON = JSON.stringify({
+    held: "earphones",
+    certain: true,
+    reasoning: "White earphones are clearly visible in the person's hand.",
+  });
+  const REMOTE_JSON = JSON.stringify({
+    held: "remote",
+    certain: true,
+    reasoning: "A remote control is clearly visible in the person's hand.",
+  });
+  const INVENTED_NOTEBOOK_JSON = JSON.stringify({
+    held: "notebook",
+    certain: true,
+    reasoning: "The person appears to be holding a notebook.",
+  });
+
+  it("a HIGH-band detector guess (remote@0.88) is reported directly with NO VLM call", async () => {
+    engineState.sessionId = "sess-1";
+    engineState.bufferedFrame = null;
+    seedScene({ heldObject: { label: "remote", confidence: 0.88 } });
+    const { model, calls } = makeModel(() => REMOTE_JSON);
+
+    const result = await resolveVisionPlan({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+      model,
+      language: "english",
+      requestId: "test-high-direct",
+    });
+
+    expect(calls).toHaveLength(0); // instant, no Gemma involved
+    expect(result.kind).toBe("direct");
+    if (result.kind === "direct") {
+      expect(result.text).toBe("You're holding a remote.");
+    }
+  });
+
+  it("an UNCERTAIN-band guess (remote@0.72) escalates to ONE focused VLM and names earphones with a hedge (the bug)", async () => {
+    engineState.sessionId = "sess-1";
+    engineState.bufferedFrame = null;
+    // The detector misdetects earphones as "remote": weak ROI evidence that
+    // reached 2-of-3 consensus and got reported at the 0.7 floor.
+    seedScene({
+      heldCandidates: [{ label: "remote", confidence: 0.32, source: "roi", inHandRegion: true }],
+      heldObject: { label: "remote", confidence: 0.72 },
+    });
+    const { model, calls } = makeModel(() => EARPHONES_JSON);
+
+    const result = await resolveVisionPlan({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+      model,
+      language: "english",
+      requestId: "test-uncertain-escalate",
+    });
+
+    expect(calls).toHaveLength(1); // exactly one bounded focused call
+    // The weak evidence is flagged as low-confidence in the prompt.
+    expect(calls[0].prompt).toContain("LOW confidence — these may be false positives");
+    expect(result.kind).toBe("direct-vlm");
+    if (result.kind === "direct-vlm") {
+      expect(result.text).toBe(
+        "It looks like you're holding earphones — I can't fully confirm that with my object detector, but that's what I can see."
+      );
+      expect(result.text).not.toContain("remote");
+    }
+  });
+
+  it("the same uncertain-band guess is confirmed as 'remote' when the VLM sees it", async () => {
+    engineState.sessionId = "sess-1";
+    engineState.bufferedFrame = null;
+    seedScene({
+      heldCandidates: [{ label: "remote", confidence: 0.32, source: "roi", inHandRegion: true }],
+      heldObject: { label: "remote", confidence: 0.72 },
+    });
+    const { model, calls } = makeModel(() => REMOTE_JSON);
+
+    const result = await resolveVisionPlan({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+      model,
+      language: "english",
+      requestId: "test-uncertain-confirm",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(result.kind).toBe("direct-vlm");
+    if (result.kind === "direct-vlm") {
+      expect(result.text).toBe("You're holding a remote.");
+    }
+  });
+
+  it("focused path: weak 'remote' evidence + confident VLM 'earphones' -> hedged earphones, not the raw guess", async () => {
+    engineState.sessionId = "sess-1";
+    engineState.bufferedFrame = null;
+    // The reported first answer: no held object yet, but the weak remote
+    // evidence used to veto the correct VLM answer.
+    seedScene({
+      heldCandidates: [{ label: "remote", confidence: 0.32, source: "roi", inHandRegion: true }],
+    });
+    const { model, calls } = makeModel(() => EARPHONES_JSON);
+
+    const result = await resolveVisionPlan({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+      model,
+      language: "english",
+      requestId: "test-weak-evidence-vlm-only",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].prompt).toContain("LOW confidence — these may be false positives");
+    expect(result.kind).toBe("direct-vlm");
+    if (result.kind === "direct-vlm") {
+      expect(result.text).toBe(
+        "It looks like you're holding earphones — I can't fully confirm that with my object detector, but that's what I can see."
+      );
+      expect(result.text).not.toContain("remote");
+    }
+  });
+
+  it("focused path: the notebook hallucination is still rejected even with weak conflicting evidence", async () => {
+    engineState.sessionId = "sess-1";
+    engineState.bufferedFrame = null;
+    seedScene({
+      heldCandidates: [{ label: "remote", confidence: 0.32, source: "roi", inHandRegion: true }],
+    });
+    const { model, calls } = makeModel(() => INVENTED_NOTEBOOK_JSON);
+
+    const result = await resolveVisionPlan({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+      model,
+      language: "english",
+      requestId: "test-notebook-weak-evidence",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(result.kind).toBe("direct-vlm");
+    if (result.kind === "direct-vlm") {
+      expect(result.text).toBe("I can't identify the object clearly from the current frame.");
+      expect(result.text).not.toContain("notebook");
+    }
+  });
+});

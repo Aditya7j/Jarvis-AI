@@ -184,9 +184,18 @@ function heldEvidenceFrom(
   // Always built when a frame is available, even with zero candidates: the
   // empty hand-region evidence still carries `hasPerson`, which the focused VLM
   // grounding needs to admit a clearly-seen off-vocabulary object (pen, keys,
-  // earbuds) on the lower-confidence vlm-only tier.
-  const labels = new Set((candidates ?? []).map((candidate) => candidate.label));
-  return { labels, region: handRegion ?? null, hasPerson };
+  // earbuds) on the lower-confidence vlm-only tier. Per-label confidence is
+  // carried so the vlm-only tier can tell a weak false-positive detection
+  // ("remote" at 0.32 that is really earphones) from a strong one.
+  const labelConfidence = new Map<string, number>();
+  for (const candidate of candidates ?? []) {
+    const current = labelConfidence.get(candidate.label) ?? 0;
+    if (candidate.confidence > current) {
+      labelConfidence.set(candidate.label, candidate.confidence);
+    }
+  }
+  const labels = new Set(labelConfidence.keys());
+  return { labels, labelConfidence, region: handRegion ?? null, hasPerson };
 }
 
 /**

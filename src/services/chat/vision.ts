@@ -328,7 +328,12 @@ async function analyzeFocusedFrame(
       canonical: verdict.canonical,
       accepted: verdict.accepted,
       tier: verdict.tier,
+      reason: verdict.reason,
       evidence: evidence && evidence.labels.size > 0 ? [...evidence.labels] : null,
+      evidenceConfidence:
+        evidence?.labelConfidence && evidence.labelConfidence.size > 0
+          ? Object.fromEntries(evidence.labelConfidence)
+          : null,
       hasPerson: evidence?.hasPerson ?? null,
     });
     if (!verdict.accepted) {
@@ -658,6 +663,10 @@ export async function resolveVisionPlan(
         evidence: vlmContext?.evidence && vlmContext.evidence.labels.size > 0
           ? [...vlmContext.evidence.labels]
           : null,
+        evidenceConfidence:
+          vlmContext?.evidence?.labelConfidence && vlmContext.evidence.labelConfidence.size > 0
+            ? Object.fromEntries(vlmContext.evidence.labelConfidence)
+            : null,
         finalText: plan.text ?? null,
         fallbackText: fallbackText ?? null,
       });

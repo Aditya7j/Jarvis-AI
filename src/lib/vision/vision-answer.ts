@@ -220,18 +220,21 @@ export function answerFromVisionCache(prompt: string): SimpleVisionAnswer {
 
   // --- Holding ---
   if (/\bwhat\s+am\s+i\s+holding\b|\bholding\b|\bin\s+my\s+(hand|hands|lap)\b/.test(p)) {
-    if (held && held.confidence >= 0.25) {
+    if (held && confidenceBand(held.confidence * 100) === "high") {
       const confidence = Math.round(held.confidence * 100);
       return finalize(
         `You're holding ${/^[aeiou]/i.test(held.label) ? "an" : "a"} ${held.label}.`,
         confidence
       );
     }
-    // YOLO has no held-object for this frame. Escalate to ONE bounded, focused
-    // VLM call on the newest frame so "what am I holding?" is actually answered
-    // instead of instantly guessing. The caller degrades to this honest text if
-    // the VLM cannot answer within the interactive budget — it never invents a
-    // held object from generic scene detections.
+    // A weak or uncertain detector guess — e.g. earphones misdetected as
+    // "remote" at 0.72 after 2-of-3 consensus — is NOT trustworthy enough to
+    // report directly (it may be a false positive), and neither is having no
+    // held-object at all. Escalate to ONE bounded, focused VLM call on the
+    // newest frame so "what am I holding?" is actually answered instead of
+    // instantly shipping a likely-false guess. The caller degrades to this
+    // honest text if the VLM cannot answer within the interactive budget — it
+    // never invents a held object from generic scene detections.
     return {
       text: "I can't identify the object clearly from the current frame.",
       confidence: 55,

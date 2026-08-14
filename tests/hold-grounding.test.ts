@@ -314,17 +314,17 @@ describe("groundHeldVlmTiered — two-tier grounding", () => {
 
   it("detector tier: accepts a phone the detector observed in the hand region", () => {
     const verdict = groundHeldVlmTiered("phone", true, "A phone is in the hand.", phoneEvidence);
-    expect(verdict).toEqual({ accepted: true, canonical: "cell phone", tier: "detector" });
+    expect(verdict).toEqual({ accepted: true, canonical: "cell phone", tier: "detector", reason: "detector evidence" });
   });
 
   it("detector tier: rejects a notebook the detector never observed (the bug)", () => {
     const verdict = groundHeldVlmTiered("notebook", true, "The person holds a notebook.", phoneEvidence);
-    expect(verdict).toEqual({ accepted: false, canonical: "book", tier: null });
+    expect(verdict).toEqual({ accepted: false, canonical: "book", tier: null, reason: "label not observed by detector" });
   });
 
   it("a COCO-class label is never admitted through the vlm-only tier", () => {
     const verdict = groundHeldVlmTiered("notebook", true, "The person clearly holds a notebook.", emptyEvidence);
-    expect(verdict).toEqual({ accepted: false, canonical: "book", tier: null });
+    expect(verdict).toEqual({ accepted: false, canonical: "book", tier: null, reason: "label not observed by detector" });
   });
 
   it("detector tier: accepts a newly-added class the detector observed (backpack)", () => {
@@ -334,12 +334,12 @@ describe("groundHeldVlmTiered — two-tier grounding", () => {
       hasPerson: true,
     };
     const verdict = groundHeldVlmTiered("backpack", true, "A backpack is held at the side.", backpackEvidence);
-    expect(verdict).toEqual({ accepted: true, canonical: "backpack", tier: "detector" });
+    expect(verdict).toEqual({ accepted: true, canonical: "backpack", tier: "detector", reason: "detector evidence" });
   });
 
   it("vlm-only: accepts a certain, specific, plausible off-vocab object with empty evidence", () => {
     const verdict = groundHeldVlmTiered("pen", true, "A pen is clearly visible in the person's right hand.", emptyEvidence);
-    expect(verdict).toEqual({ accepted: true, canonical: null, tier: "vlm-only" });
+    expect(verdict).toEqual({ accepted: true, canonical: null, tier: "vlm-only", reason: "vlm-only, no detector evidence" });
   });
 
   it("vlm-only: accepts keys and earbuds", () => {
@@ -377,6 +377,83 @@ describe("groundHeldVlmTiered — two-tier grounding", () => {
       accepted: false,
       canonical: null,
       tier: null,
+      reason: "no VLM label",
     });
+  });
+
+  it("vlm-only: weak conflicting evidence (remote@0.32) does NOT block earphones (the bug)", () => {
+    const weakRemoteEvidence = {
+      labels: new Set(["remote"]),
+      labelConfidence: new Map([["remote", 0.32]]),
+      region: { x: 30, y: 140, width: 140, height: 260 },
+      hasPerson: true,
+    };
+    const verdict = groundHeldVlmTiered(
+      "earphones",
+      true,
+      "White earphones are clearly visible in the person's hand.",
+      weakRemoteEvidence
+    );
+    expect(verdict).toEqual({
+      accepted: true,
+      canonical: null,
+      tier: "vlm-only",
+      reason: "vlm-only, weak conflicting evidence",
+    });
+  });
+
+  it("vlm-only: weak conflicting evidence never admits a COCO-class label not observed", () => {
+    const weakRemoteEvidence = {
+      labels: new Set(["remote"]),
+      labelConfidence: new Map([["remote", 0.32]]),
+      region: { x: 30, y: 140, width: 140, height: 260 },
+      hasPerson: true,
+    };
+    const verdict = groundHeldVlmTiered(
+      "notebook",
+      true,
+      "The person clearly holds a notebook.",
+      weakRemoteEvidence
+    );
+    expect(verdict.accepted).toBe(false);
+    expect(verdict.canonical).toBe("book"); // notebook -> book, still detector-grounded only
+    expect(verdict.reason).toBe("label not observed by detector");
+  });
+
+  it("detector tier: a weak detector observation the VLM confirms is still accepted", () => {
+    const weakRemoteEvidence = {
+      labels: new Set(["remote"]),
+      labelConfidence: new Map([["remote", 0.32]]),
+      region: { x: 30, y: 140, width: 140, height: 260 },
+      hasPerson: true,
+    };
+    const verdict = groundHeldVlmTiered("remote", true, "A remote is visible in the hand.", weakRemoteEvidence);
+    expect(verdict).toEqual({ accepted: true, canonical: "remote", tier: "detector", reason: "detector evidence" });
+  });
+
+  it("vlm-only: strong evidence (remote@0.5) still blocks an off-vocab answer", () => {
+    const strongRemoteEvidence = {
+      labels: new Set(["remote"]),
+      labelConfidence: new Map([["remote", 0.5]]),
+      region: { x: 30, y: 140, width: 140, height: 260 },
+      hasPerson: true,
+    };
+    const verdict = groundHeldVlmTiered(
+      "earphones",
+      true,
+      "White earphones are clearly visible in the person's hand.",
+      strongRemoteEvidence
+    );
+    expect(verdict.accepted).toBe(false);
+    expect(verdict.tier).toBeNull();
+    expect(verdict.reason).toBe("blocked by strong detector evidence");
+  });
+
+  it("vlm-only: legacy evidence without per-label confidence stays conservative (blocks)", () => {
+    // phoneEvidence has no labelConfidence map -> treated as STRONG, so the
+    // vlm-only tier stays closed exactly as before this change.
+    const verdict = groundHeldVlmTiered("keys", true, "Keys are visible in the clenched hand.", phoneEvidence);
+    expect(verdict.accepted).toBe(false);
+    expect(verdict.reason).toBe("blocked by strong detector evidence");
   });
 });
