@@ -92,6 +92,12 @@ const H_VISION: GoldenCase[] = [
   { question: "What am I holding?", expected: "vision" },
   { question: "What am I wearing?", expected: "vision" },
   { question: "What is on my screen?", expected: "vision" },
+  // Typo tolerance: dropped / transposed letters must keep the camera route,
+  // never fall through to the plain conversational model.
+  { question: "what am i weaing", expected: "vision" },
+  { question: "what am i waering", expected: "vision" },
+  { question: "what am i holdin", expected: "vision" },
+  { question: "what am i holdign", expected: "vision" },
 ];
 
 /**

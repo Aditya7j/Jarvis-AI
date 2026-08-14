@@ -37,11 +37,12 @@ import {
 import { localizeConversationalReply, localizeReply } from "@/lib/lang/replies";
 import {
   DEFAULT_SYSTEM_PROMPT,
+  buildNoCameraSystemContext,
   buildVerifiedFactContext,
   languageInstruction,
 } from "@/lib/ai/prompts";
 import type { VisionAnalysisSummary } from "@/lib/ai/prompts";
-import { classifyVisionDepth } from "@/lib/ai/vision-intent";
+import { classifyVisionAdjacent, classifyVisionDepth } from "@/lib/ai/vision-intent";
 import { formatDateIn, formatTimeIn } from "@/lib/time/time-service";
 import { getSystemClock, logTimeService } from "@/lib/time/time-service";
 import { extractDateTokens } from "@/lib/time/date-calc";
@@ -1788,8 +1789,24 @@ export async function* runPipeline(
     yield { kind: "status", phase: "answering" };
     const filter = new CoTFilter();
     wf.mark("context_build");
-    const contextBlocks: Array<string | null> = [languageBlock];
+    // The conversational model runs under the FULL OS ruleset (DEFAULT_SYSTEM_PROMPT)
+    // — the capability-honesty rule forbids claiming a camera/sensor/tool it never
+    // actually used. Without this base, the provider's auto-inject never fires
+    // (a system block always exists) and the model would answer unconstrained.
+    const contextBlocks: Array<string | null> = [DEFAULT_SYSTEM_PROMPT, languageBlock];
     if (options.includeAwareness !== false) contextBlocks.push(awarenessBlock());
+    // Routing backstop: a camera-adjacent prompt that slipped past the vision
+    // classifier (an unusual typo or phrasing) must never reach the plain model
+    // believing it can see. With no live vision data attached, inject the honest
+    // no-camera context so it states the missing capability instead of narrating
+    // a camera it never opened.
+    if (
+      options.vision?.state !== "live" &&
+      (options.vision?.frames?.length ?? 0) === 0 &&
+      classifyVisionAdjacent(q)
+    ) {
+      contextBlocks.push(buildNoCameraSystemContext());
+    }
     const finalMessages = withSystemContext(messages, contextBlocks);
     wf.end("context_build");
     llmInvoked = true;
