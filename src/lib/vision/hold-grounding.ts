@@ -1,4 +1,4 @@
-import { SMALL_OBJECT_CLASSES } from "./detect/coco-classes";
+import { COCO_CLASSES, SMALL_OBJECT_CLASSES } from "./detect/coco-classes";
 
 /**
  * Held-object grounding: pure, testable helpers that keep the "what am I
@@ -24,6 +24,15 @@ import { SMALL_OBJECT_CLASSES } from "./detect/coco-classes";
  *   - A consensus-established held object is reported at >= HELD_REPORT_CONFIDENCE
  *     so the cache answer names it with an honesty hedge instead of degrading to
  *     a low-confidence reposition prompt.
+ *
+ * Second, lower-confidence tier ("vlm-only"): the detector only knows a fixed
+ * COCO vocabulary, so it can never see everyday items like pens, keys, earbuds
+ * or glasses. When the detector has NO hand-region evidence at all, a CERTAIN,
+ * specifically-reasoned VLM answer naming a plausible off-vocabulary object is
+ * accepted with an explicit hedge ("It looks like you're holding...") instead
+ * of being auto-rejected. A COCO-class label is never admitted through this
+ * tier — it must be detector-grounded, which keeps the "notebook that was never
+ * detected" hallucination path closed.
  */
 
 export interface HeldCandidate {
@@ -231,7 +240,12 @@ const OBJECT_ALIASES: Record<string, string> = {
 export function normalizeObjectAlias(label: string | null): string | null {
   if (!label) return null;
   const normalized = label.trim().toLowerCase();
-  return OBJECT_ALIASES[normalized] ?? null;
+  if (OBJECT_ALIASES[normalized]) return OBJECT_ALIASES[normalized];
+  // Exact COCO class names are their own canonical label (backpack, handbag,
+  // tie, umbrella, suitcase, ...). Only detector-capable classes can ever be
+  // matched through this path because evidence only ever contains small-class
+  // labels from qualifyHeldCandidates.
+  return COCO_CLASSES.includes(normalized) ? normalized : null;
 }
 
 /**
@@ -250,4 +264,133 @@ export function groundHeldVlmResult(
   if (!evidence || !evidence.hasPerson) return { accepted: false, canonical };
   if (evidence.labels.size === 0) return { accepted: false, canonical };
   return { accepted: evidence.labels.has(canonical), canonical };
+}
+
+/**
+ * How a focused "held" answer was grounded. "detector" = the label matched
+ * detector evidence in the hand region (the original, strict tier). "vlm-only"
+ * = the detector had nothing to say about the hand region and a certain,
+ * specifically-reasoned VLM answer for an off-vocabulary object was accepted
+ * with an explicit hedge. null = rejected.
+ */
+export type GroundingTier = "detector" | "vlm-only";
+
+export interface HeldVlmVerdict {
+  accepted: boolean;
+  canonical: string | null;
+  tier: GroundingTier | null;
+}
+
+/**
+ * Everyday handheld items the COCO detector can never see but a VLM can clearly
+ * name. Used as a sanity signal for the vlm-only tier (NOT a hard allowlist —
+ * any plausible non-COCO label passes the shape checks).
+ */
+const EVERYDAY_HELD_LABELS: Set<string> = new Set([
+  "pen",
+  "pencil",
+  "keys",
+  "key",
+  "keyring",
+  "keychain",
+  "wallet",
+  "purse",
+  "earbuds",
+  "airpods",
+  "earphones",
+  "headphones",
+  "headphone",
+  "glasses",
+  "sunglasses",
+  "spectacles",
+  "tablet",
+  "ipad",
+  "id card",
+  "id",
+  "lighter",
+  "mask",
+  "cable",
+  "charger",
+  "sticker",
+  "note",
+  "paper",
+]);
+
+const VLM_LABEL_MIN_LENGTH = 2;
+const VLM_LABEL_MAX_LENGTH = 40;
+const VLM_LABEL_MAX_WORDS = 4;
+
+/**
+ * Sanity check for an off-vocabulary VLM label: reasonable length, at most a
+ * few words, and either a known everyday hand-held item OR not a COCO class.
+ * A label that normalizes to a COCO class is intentionally NOT plausible here —
+ * COCO classes must stay on the detector-grounded tier.
+ */
+export function plausibleHeldLabel(label: string | null): boolean {
+  if (!label) return false;
+  const trimmed = label.trim().toLowerCase();
+  if (trimmed.length < VLM_LABEL_MIN_LENGTH) return false;
+  if (trimmed.length > VLM_LABEL_MAX_LENGTH) return false;
+  if (trimmed.split(/\s+/).length > VLM_LABEL_MAX_WORDS) return false;
+  if (EVERYDAY_HELD_LABELS.has(trimmed)) return true;
+  return !COCO_CLASSES.includes(trimmed);
+}
+
+const VLM_HEDGE_WORDS =
+  /\b(maybe|probably|possibly|guess|i think|could be|might be|not sure|not certain)\b/i;
+const VLM_REASONING_MIN_LENGTH = 6;
+
+/**
+ * The VLM's one-sentence justification must be concrete enough to back a
+ * claim: at least a few characters and no hedge words. A hedge in the reasoning
+ * ("I think it might be a pen") cancels the vlm-only acceptance.
+ */
+export function reasoningIsSpecific(reasoning: string): boolean {
+  const text = (reasoning ?? "").trim();
+  if (text.length < VLM_REASONING_MIN_LENGTH) return false;
+  return !VLM_HEDGE_WORDS.test(text);
+}
+
+/**
+ * Two-tier grounding for a focused VLM "held" answer:
+ *
+ *   - "detector": the VLM label normalizes to a COCO class. It is accepted ONLY
+ *     when the detector observed that class in the hand region of the same
+ *     frame (identical to `groundHeldVlmResult`). Everything else is rejected.
+ *   - "vlm-only": the label does not normalize to any COCO class (off-vocabulary
+ *     — pen, keys, earbuds, ...). It is accepted ONLY when the detector has NO
+ *     hand-region evidence at all, a person is tracked, the VLM is certain, its
+ *     reasoning is specific, and the label is plausible. Accepted verdicts from
+ *     this tier must be reported with an explicit hedge.
+ */
+export function groundHeldVlmTiered(
+  vlmLabel: string | null,
+  certain: boolean,
+  reasoning: string,
+  evidence: HeldObjectEvidence | null
+): HeldVlmVerdict {
+  if (!vlmLabel) return { accepted: false, canonical: null, tier: null };
+  const canonical = normalizeObjectAlias(vlmLabel);
+  if (canonical) {
+    if (!evidence || !evidence.hasPerson) {
+      return { accepted: false, canonical, tier: null };
+    }
+    if (evidence.labels.size === 0) return { accepted: false, canonical, tier: null };
+    if (evidence.labels.has(canonical)) {
+      return { accepted: true, canonical, tier: "detector" };
+    }
+    return { accepted: false, canonical, tier: null };
+  }
+  if (!evidence || !evidence.hasPerson) {
+    return { accepted: false, canonical: null, tier: null };
+  }
+  if (evidence.labels.size > 0) return { accepted: false, canonical: null, tier: null };
+  if (!certain) return { accepted: false, canonical: null, tier: null };
+  if (!reasoningIsSpecific(reasoning)) {
+    return { accepted: false, canonical: null, tier: null };
+  }
+  if (!plausibleHeldLabel(vlmLabel)) {
+    return { accepted: false, canonical: null, tier: null };
+  }
+  return { accepted: true, canonical: null, tier: "vlm-only" };
 }

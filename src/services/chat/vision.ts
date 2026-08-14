@@ -19,13 +19,17 @@ import {
   buildVisionSystemContext,
   parseFocusedVisionAnalysis,
   parseVisionAnalysis,
+  parseWearingVisionAnalysis,
   summarizeVisionAnalysis,
   type FocusedVisionResult,
   type VisionAnalysisSummary,
   type VisionStructuredAnalysis,
 } from "@/lib/ai/prompts";
 import { stripDataUrlPrefix } from "@/lib/ai/image-resize";
-import { groundHeldVlmResult, type HeldObjectEvidence } from "@/lib/vision/hold-grounding";
+import {
+  groundHeldVlmTiered,
+  type HeldObjectEvidence,
+} from "@/lib/vision/hold-grounding";
 import type { VisionDepth } from "@/lib/ai/vision-intent";
 import { CONFIDENCE_MID } from "@/lib/vision/confidence";
 import { getCurrentWaterfall } from "@/lib/metrics/waterfall";
@@ -253,7 +257,6 @@ async function analyzeFocusedFrame(
     : frame.image;
   const prompt =
     focus === "holding" ? buildFocusedHoldingPrompt(evidence) : VISION_WEARING_PROMPT;
-  const key = focus === "holding" ? ("held" as const) : ("shirt_color" as const);
   const debugFrame = saveDebugFrame(imageBase64, frame.mimeType);
   log.info("[Vision] focused frame sent to Gemma 3", {
     focus,
@@ -304,22 +307,27 @@ async function analyzeFocusedFrame(
     chars: raw.length,
     latencyMs: Date.now() - startedAt,
   });
-  let parsed = parseFocusedVisionAnalysis(raw, key);
+  let parsed = focus === "holding" ? parseFocusedVisionAnalysis(raw, "held") : parseWearingVisionAnalysis(raw);
   if (!parsed) {
     return {
       result: null,
       error: `Focused Gemma 3 response could not be parsed (received ${raw.length} chars).`,
     };
   }
-  // Grounding verdict: the VLM may only name an object the detector observed
-  // in the hand region of this exact frame. A confident-but-ungrounded label
-  // ("notebook" that was never detected) is rejected -> honest fallback.
+  // Grounding verdict for holding: the VLM may only name an object the detector
+  // observed in the hand region of this exact frame (detector tier), OR — when
+  // the detector has no hand-region evidence at all — a certain, specific,
+  // plausible off-vocabulary object (pen, keys, earbuds) on the lower-confidence
+  // vlm-only tier, which the answer layer reports with an explicit hedge. A
+  // confident-but-ungrounded COCO label ("notebook" that was never detected) is
+  // rejected -> honest fallback.
   if (focus === "holding") {
-    const verdict = groundHeldVlmResult(parsed.value, evidence);
+    const verdict = groundHeldVlmTiered(parsed.value, parsed.certain, parsed.reasoning, evidence);
     log.info("[VisionProof] holding grounding verdict", {
       vlmValue: parsed.value,
       canonical: verdict.canonical,
       accepted: verdict.accepted,
+      tier: verdict.tier,
       evidence: evidence && evidence.labels.size > 0 ? [...evidence.labels] : null,
       hasPerson: evidence?.hasPerson ?? null,
     });
@@ -331,6 +339,8 @@ async function analyzeFocusedFrame(
           ? `The detector did not observe "${verdict.canonical}" in the hand region of this frame.`
           : "The detector observed nothing in the hand region of this frame.",
       };
+    } else {
+      parsed = { ...parsed, tier: verdict.tier };
     }
   }
   return { result: parsed, error: null };
@@ -383,19 +393,25 @@ async function analyzeAndCachePlan(
       const directText =
         focus === "holding"
           ? focused.result.certain && focused.result.value
-            ? `You're holding ${article(focused.result.value)}.`
+            ? focused.result.tier === "vlm-only"
+              ? `It looks like you're holding ${article(focused.result.value)} — I can't fully confirm that with my object detector, but that's what I can see.`
+              : `You're holding ${article(focused.result.value)}.`
             : (fallbackText ?? "I can't identify the object clearly from the current frame.")
           : focused.result.certain && focused.result.value
-            ? `You're wearing a ${focused.result.value} shirt.`
+            ? `You're wearing a ${focused.result.value} ${focused.result.garmentType ?? "top"}.`
             : (fallbackText ?? "I can see you, but I can't make out what you're wearing clearly yet.");
       const summary = summarizeVisionAnalysis(null, {
         state: "live",
         source: frame.source,
         capturedAt: frame.capturedAt,
       });
+      // Detector-grounded answers land in the high band; a vlm-only (hedged)
+      // answer stays below CONFIDENCE_MID so the reported confidence matches the
+      // uncertainty in the text.
+      const certainConfidence = focused.result.tier === "vlm-only" ? CONFIDENCE_MID - 10 : 75;
       const cachedSummary = {
         ...summary,
-        confidence: focused.result.certain ? Math.max(summary.confidence ?? 0, 75) : summary.confidence,
+        confidence: focused.result.certain ? Math.max(summary.confidence ?? 0, certainConfidence) : summary.confidence,
       };
       const systemContext = `The last camera analysis is focused on what the user is ${focus === "holding" ? "holding" : "wearing"}.\n${focused.result.reasoning}`;
       cacheVisionResult({
@@ -461,9 +477,12 @@ async function analyzeAndCachePlan(
   }
 }
 
-/** Minimal indefinite-article helper for grounded direct answers. */
+/** Minimal indefinite-article helper for grounded direct answers. Plural
+ *  everyday objects ("keys", "earbuds", "glasses") take no article. */
 function article(noun: string): string {
-  return /^[aeiou]/i.test(noun) ? `an ${noun}` : `a ${noun}`;
+  const trimmed = noun.trim();
+  if (/s$/i.test(trimmed) && trimmed.length > 2) return trimmed;
+  return /^[aeiou]/i.test(trimmed) ? `an ${trimmed}` : `a ${trimmed}`;
 }
 
 /**

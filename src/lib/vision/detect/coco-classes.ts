@@ -104,6 +104,11 @@ export const SMALL_OBJECT_CLASSES: Set<string> = new Set([
   "clock",
   "wine glass",
   "vase",
+  "backpack",
+  "handbag",
+  "tie",
+  "umbrella",
+  "suitcase",
 ]);
 
 export function className(classId: number): string {

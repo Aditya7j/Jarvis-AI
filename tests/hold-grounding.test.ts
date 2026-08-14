@@ -5,9 +5,13 @@ import {
   qualifyHeldCandidates,
   normalizeObjectAlias,
   groundHeldVlmResult,
+  groundHeldVlmTiered,
+  plausibleHeldLabel,
+  reasoningIsSpecific,
   HELD_REPORT_CONFIDENCE,
   type HeldCandidate,
 } from "@/lib/vision/hold-grounding";
+import { SMALL_OBJECT_CLASSES } from "@/lib/vision/detect/coco-classes";
 
 /**
  * Held-object grounding rules.
@@ -178,6 +182,14 @@ describe("normalizeObjectAlias", () => {
     expect(normalizeObjectAlias("wristwatch")).toBe("clock");
   });
 
+  it("recognizes exact COCO class names as their own canonical label", () => {
+    expect(normalizeObjectAlias("backpack")).toBe("backpack");
+    expect(normalizeObjectAlias("handbag")).toBe("handbag");
+    expect(normalizeObjectAlias("tie")).toBe("tie");
+    expect(normalizeObjectAlias("umbrella")).toBe("umbrella");
+    expect(normalizeObjectAlias("suitcase")).toBe("suitcase");
+  });
+
   it("returns null for unknown or empty phrasings", () => {
     expect(normalizeObjectAlias(null)).toBeNull();
     expect(normalizeObjectAlias("")).toBeNull();
@@ -222,5 +234,149 @@ describe("groundHeldVlmResult — the VLM may only name what the detector saw", 
 
   it("handles no evidence at all", () => {
     expect(groundHeldVlmResult("phone", null).accepted).toBe(false);
+  });
+});
+
+describe("SMALL_OBJECT_CLASSES — everyday carry COCO classes", () => {
+  it("now includes backpack, handbag, tie, umbrella and suitcase", () => {
+    for (const label of ["backpack", "handbag", "tie", "umbrella", "suitcase"]) {
+      expect(SMALL_OBJECT_CLASSES.has(label)).toBe(true);
+    }
+  });
+
+  it("qualifyHeldCandidates admits the newly added classes", () => {
+    const candidates: HeldCandidate[] = [
+      { label: "backpack", confidence: 0.8, source: "main", inHandRegion: true },
+      { label: "umbrella", confidence: 0.6, source: "roi", inHandRegion: true },
+      { label: "suitcase", confidence: 0.9, source: "roi", inHandRegion: true, inDeskStrip: true },
+    ];
+    expect(qualifyHeldCandidates(candidates).map((c) => c.label)).toEqual([
+      "backpack",
+      "umbrella",
+    ]);
+  });
+});
+
+describe("plausibleHeldLabel — vlm-only sanity signal", () => {
+  it("accepts curated everyday items", () => {
+    for (const label of ["pen", "pencil", "keys", "wallet", "earbuds", "glasses", "sunglasses", "tablet", "id card", "lighter", "mask", "charger"]) {
+      expect(plausibleHeldLabel(label)).toBe(true);
+    }
+  });
+
+  it("accepts non-COCO free-form labels with a sane shape", () => {
+    expect(plausibleHeldLabel("lanyard badge")).toBe(true);
+    expect(plausibleHeldLabel("stickers")).toBe(true);
+  });
+
+  it("rejects COCO class names — those must stay detector-grounded", () => {
+    expect(plausibleHeldLabel("bottle")).toBe(false);
+    expect(plausibleHeldLabel("book")).toBe(false);
+    expect(plausibleHeldLabel("cell phone")).toBe(false);
+  });
+
+  it("rejects empty, absurdly long, or many-word labels", () => {
+    expect(plausibleHeldLabel(null)).toBe(false);
+    expect(plausibleHeldLabel("")).toBe(false);
+    expect(plausibleHeldLabel("   ")).toBe(false);
+    expect(plausibleHeldLabel("a")).toBe(false);
+    expect(plausibleHeldLabel("m".repeat(50))).toBe(false);
+    expect(plausibleHeldLabel("some extremely long object description in view")).toBe(false);
+  });
+});
+
+describe("reasoningIsSpecific", () => {
+  it("accepts concrete justifications", () => {
+    expect(reasoningIsSpecific("A pen is clearly visible in the person's right hand.")).toBe(true);
+    expect(reasoningIsSpecific("keys visible between the fingers")).toBe(true);
+  });
+
+  it("rejects hedged or empty reasoning", () => {
+    expect(reasoningIsSpecific("")).toBe(false);
+    expect(reasoningIsSpecific("short")).toBe(false);
+    expect(reasoningIsSpecific("I think it might be a pen.")).toBe(false);
+    expect(reasoningIsSpecific("probably some keys")).toBe(false);
+    expect(reasoningIsSpecific("Not sure, could be a pen.")).toBe(false);
+  });
+});
+
+describe("groundHeldVlmTiered — two-tier grounding", () => {
+  const phoneEvidence = {
+    labels: new Set(["cell phone"]),
+    region: { x: 30, y: 140, width: 140, height: 260 },
+    hasPerson: true,
+  };
+  const emptyEvidence = {
+    labels: new Set<string>(),
+    region: { x: 30, y: 140, width: 140, height: 260 },
+    hasPerson: true,
+  };
+
+  it("detector tier: accepts a phone the detector observed in the hand region", () => {
+    const verdict = groundHeldVlmTiered("phone", true, "A phone is in the hand.", phoneEvidence);
+    expect(verdict).toEqual({ accepted: true, canonical: "cell phone", tier: "detector" });
+  });
+
+  it("detector tier: rejects a notebook the detector never observed (the bug)", () => {
+    const verdict = groundHeldVlmTiered("notebook", true, "The person holds a notebook.", phoneEvidence);
+    expect(verdict).toEqual({ accepted: false, canonical: "book", tier: null });
+  });
+
+  it("a COCO-class label is never admitted through the vlm-only tier", () => {
+    const verdict = groundHeldVlmTiered("notebook", true, "The person clearly holds a notebook.", emptyEvidence);
+    expect(verdict).toEqual({ accepted: false, canonical: "book", tier: null });
+  });
+
+  it("detector tier: accepts a newly-added class the detector observed (backpack)", () => {
+    const backpackEvidence = {
+      labels: new Set(["backpack"]),
+      region: { x: 30, y: 140, width: 140, height: 260 },
+      hasPerson: true,
+    };
+    const verdict = groundHeldVlmTiered("backpack", true, "A backpack is held at the side.", backpackEvidence);
+    expect(verdict).toEqual({ accepted: true, canonical: "backpack", tier: "detector" });
+  });
+
+  it("vlm-only: accepts a certain, specific, plausible off-vocab object with empty evidence", () => {
+    const verdict = groundHeldVlmTiered("pen", true, "A pen is clearly visible in the person's right hand.", emptyEvidence);
+    expect(verdict).toEqual({ accepted: true, canonical: null, tier: "vlm-only" });
+  });
+
+  it("vlm-only: accepts keys and earbuds", () => {
+    expect(groundHeldVlmTiered("keys", true, "Keys are visible in the clenched hand.", emptyEvidence).tier).toBe("vlm-only");
+    expect(groundHeldVlmTiered("earbuds", true, "White earbuds hang from the fingers.", emptyEvidence).tier).toBe("vlm-only");
+  });
+
+  it("vlm-only: rejects an uncertain VLM even with specific reasoning", () => {
+    const verdict = groundHeldVlmTiered("pen", false, "A pen is clearly visible in the person's right hand.", emptyEvidence);
+    expect(verdict.accepted).toBe(false);
+  });
+
+  it("vlm-only: rejects hedged or too-short reasoning", () => {
+    expect(groundHeldVlmTiered("pen", true, "I think it might be a pen.", emptyEvidence).accepted).toBe(false);
+    expect(groundHeldVlmTiered("pen", true, "pen.", emptyEvidence).accepted).toBe(false);
+  });
+
+  it("vlm-only: rejects when the detector saw a DIFFERENT held object", () => {
+    const verdict = groundHeldVlmTiered("keys", true, "Keys are visible in the clenched hand.", phoneEvidence);
+    expect(verdict.accepted).toBe(false);
+    expect(verdict.tier).toBeNull();
+  });
+
+  it("vlm-only: rejects when no person is tracked", () => {
+    const noPerson = { labels: new Set<string>(), region: null, hasPerson: false };
+    expect(groundHeldVlmTiered("pen", true, "A pen is clearly visible.", noPerson).accepted).toBe(false);
+  });
+
+  it("vlm-only: rejects implausible labels", () => {
+    expect(groundHeldVlmTiered("something vaguely held in a hazy blur", true, "A pen is clearly visible.", emptyEvidence).accepted).toBe(false);
+  });
+
+  it("rejects a null VLM value", () => {
+    expect(groundHeldVlmTiered(null, true, "Nothing in hand.", emptyEvidence)).toEqual({
+      accepted: false,
+      canonical: null,
+      tier: null,
+    });
   });
 });

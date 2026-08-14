@@ -287,3 +287,162 @@ describe("focused holding VLM call is bounded and grounded", () => {
     expect(result.kind).toBe("llm");
   });
 });
+
+describe("focused holding — vlm-only tier for off-vocabulary objects", () => {
+  const OFF_VOCAB_JSON = JSON.stringify({
+    held: "pen",
+    certain: true,
+    reasoning: "A pen is clearly visible in the person's right hand.",
+  });
+  const UNCERTAIN_PEN_JSON = JSON.stringify({
+    held: "pen",
+    certain: false,
+    reasoning: "A pen is clearly visible in the person's right hand.",
+  });
+  const BACKPACK_JSON = JSON.stringify({
+    held: "backpack",
+    certain: true,
+    reasoning: "A backpack is held in one hand.",
+  });
+
+  it("names a clearly-seen off-vocab object (pen) with an explicit hedge", async () => {
+    engineState.sessionId = "sess-1";
+    engineState.bufferedFrame = null;
+    seedScene({ heldCandidates: null, heldCrop: null });
+    const { model, calls } = makeModel(() => OFF_VOCAB_JSON);
+
+    const result = await resolveVisionPlan({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+      model,
+      language: "english",
+      requestId: "test-vlm-only",
+    });
+
+    expect(calls).toHaveLength(1);
+    // No detector evidence -> the no-evidence prompt branch still permits naming
+    // a clearly visible object (the detector only knows COCO classes).
+    expect(calls[0].prompt).toContain("found NO objects near the person's hands");
+    expect(result.kind).toBe("direct-vlm");
+    if (result.kind === "direct-vlm") {
+      expect(result.text).toBe(
+        "It looks like you're holding a pen — I can't fully confirm that with my object detector, but that's what I can see."
+      );
+    }
+  });
+
+  it("falls back when the off-vocab claim is uncertain (never asserts a pen)", async () => {
+    engineState.sessionId = "sess-1";
+    engineState.bufferedFrame = null;
+    seedScene({ heldCandidates: null, heldCrop: null });
+    const { model, calls } = makeModel(() => UNCERTAIN_PEN_JSON);
+
+    const result = await resolveVisionPlan({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+      model,
+      language: "english",
+      requestId: "test-vlm-only-uncertain",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(result.kind).toBe("direct-vlm");
+    if (result.kind === "direct-vlm") {
+      expect(result.text).toBe("I can't identify the object clearly from the current frame.");
+      expect(result.text).not.toContain("pen");
+    }
+  });
+
+  it("accepts a newly-added COCO class (backpack) the detector observed", async () => {
+    engineState.sessionId = "sess-1";
+    engineState.bufferedFrame = null;
+    seedScene({
+      heldCandidates: [{ label: "backpack", confidence: 0.7, source: "main", inHandRegion: true }],
+    });
+    const { model, calls } = makeModel(() => BACKPACK_JSON);
+
+    const result = await resolveVisionPlan({
+      prompt: "what am I holding?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+      model,
+      language: "english",
+      requestId: "test-backpack",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].prompt).toContain("backpack");
+    expect(result.kind).toBe("direct-vlm");
+    if (result.kind === "direct-vlm") {
+      expect(result.text).toBe("You're holding a backpack.");
+    }
+  });
+});
+
+describe("focused wearing — garment type is reported, never hardcoded 'shirt'", () => {
+  const HOODIE_JSON = JSON.stringify({
+    shirt_color: "blue",
+    garment_type: "hoodie",
+    certain: true,
+    reasoning: "The person is wearing a blue hoodie.",
+  });
+  const NO_TYPE_JSON = JSON.stringify({
+    shirt_color: "blue",
+    garment_type: null,
+    certain: true,
+    reasoning: "The person's shirt is blue.",
+  });
+
+  it("asks for garment_type and reports it (blue hoodie)", async () => {
+    engineState.sessionId = "sess-1";
+    engineState.bufferedFrame = null;
+    seedScene();
+    const { model, calls } = makeModel(() => HOODIE_JSON);
+
+    const result = await resolveVisionPlan({
+      prompt: "what am I wearing?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+      model,
+      language: "english",
+      requestId: "test-wearing-hoodie",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].prompt).toContain("garment_type");
+    expect(result.kind).toBe("direct-vlm");
+    if (result.kind === "direct-vlm") {
+      expect(result.text).toBe("You're wearing a blue hoodie.");
+      expect(result.text).not.toContain("shirt");
+    }
+  });
+
+  it("defaults to 'top' when the garment type is unknown", async () => {
+    engineState.sessionId = "sess-1";
+    engineState.bufferedFrame = null;
+    seedScene();
+    const { model, calls } = makeModel(() => NO_TYPE_JSON);
+
+    const result = await resolveVisionPlan({
+      prompt: "what am I wearing?",
+      depth: "simple",
+      visionState: "live",
+      frames: [],
+      model,
+      language: "english",
+      requestId: "test-wearing-no-type",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(result.kind).toBe("direct-vlm");
+    if (result.kind === "direct-vlm") {
+      expect(result.text).toBe("You're wearing a blue top.");
+    }
+  });
+});

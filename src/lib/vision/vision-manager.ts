@@ -181,8 +181,11 @@ function heldEvidenceFrom(
   hasPerson: boolean,
   handRegion: { x: number; y: number; width: number; height: number } | null
 ): HeldObjectEvidence | null {
-  if (!candidates || candidates.length === 0) return null;
-  const labels = new Set(candidates.map((candidate) => candidate.label));
+  // Always built when a frame is available, even with zero candidates: the
+  // empty hand-region evidence still carries `hasPerson`, which the focused VLM
+  // grounding needs to admit a clearly-seen off-vocabulary object (pen, keys,
+  // earbuds) on the lower-confidence vlm-only tier.
+  const labels = new Set((candidates ?? []).map((candidate) => candidate.label));
   return { labels, region: handRegion ?? null, hasPerson };
 }
 

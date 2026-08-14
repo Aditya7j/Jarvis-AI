@@ -176,7 +176,7 @@ export function buildFocusedHoldingPrompt(
   if (!evidence || evidence.labels.size === 0) {
     return `${VISION_HOLDING_PROMPT}
 
-Detector note (STRICT): the object detector found NO objects near the person's hands in this frame. Therefore "held" must be null and "certain" must be false, unless you can clearly see an object held in a visible hand.`;
+Detector note (STRICT): the object detector found NO objects near the person's hands in this frame. The detector only recognizes a fixed list of common objects — it cannot see everyday items like a pen, keys, earbuds, glasses or a wallet. If you can CLEARLY see such an object held in a visible hand, name it exactly. Otherwise "held" must be null and "certain" must be false.`;
   }
   const observed = [...evidence.labels].join(", ");
   return `${VISION_HOLDING_PROMPT}
@@ -197,6 +197,7 @@ export const VISION_WEARING_PROMPT = `You are the vision system for JARVIS. Look
 Output exactly this shape:
 {
   "shirt_color": "the primary color of the shirt/top, or null",
+  "garment_type": "the type of garment, e.g. t-shirt, shirt, hoodie, jacket, sweater, kurta, blouse, or null",
   "certain": true or false,
   "reasoning": "one short sentence stating exactly what you observed"
 }
@@ -204,12 +205,52 @@ Output exactly this shape:
 Anti-hallucination rules (STRICT):
 - Base this ONLY on what is clearly visible in the frame.
 - If no person is visible, or the shirt color cannot be clearly determined (blurred, cut off, blocked, dark), set "shirt_color" to null and "certain" to false.
+- If the garment type cannot be clearly determined (partially visible, cut off, blurred), set "garment_type" to null — never guess a type.
 - Never guess, infer, or imagine a color.`;
 
 export interface FocusedVisionResult {
   value: string | null;
   certain: boolean;
   reasoning: string;
+  /** Grounding tier of a holding verdict, set by the consumer after cross-check. */
+  tier?: "detector" | "vlm-only" | null;
+  /** Garment type for a wearing answer (e.g. hoodie, jacket) — null when unknown. */
+  garmentType?: string | null;
+}
+
+/**
+ * Parse the focused wearing JSON ("shirt_color" + "garment_type") into a direct
+ * result. Returns null when the raw output is not a parseable object with the
+ * "shirt_color" key.
+ */
+export function parseWearingVisionAnalysis(raw: string): FocusedVisionResult | null {
+  if (!raw) return null;
+  const cleaned = raw.replace(/```(?:json)?/gi, "").replace(/```/g, "").trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (!("shirt_color" in obj)) return null;
+  const value = typeof obj.shirt_color === "string" && obj.shirt_color.trim() ? obj.shirt_color.trim() : null;
+  const garmentType =
+    typeof obj.garment_type === "string" && obj.garment_type.trim()
+      ? obj.garment_type.trim()
+      : null;
+  return {
+    value,
+    certain: obj.certain === true,
+    reasoning: typeof obj.reasoning === "string" ? obj.reasoning : "",
+    garmentType,
+  };
 }
 
 /**
