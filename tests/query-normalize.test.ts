@@ -22,6 +22,7 @@ import {
   normalizeCurrency,
   normalizeQueryText,
   officeLabelOf,
+  officeNounOf,
   parseCapitalQuestion,
   parseCurrencyRequest,
   parseHinglishCapitalQuestion,
@@ -155,6 +156,57 @@ describe("rank-qualified parsing", () => {
     expect(parseRankQualifiedOffice("What is the capital of France?")).toBeNull();
     expect(parseRankQualifiedOffice("what is 15 * 3?")).toBeNull();
   });
+
+  describe("abbreviation expansion (regression: 'first Sikh PM of India')", () => {
+    it("expands 'Sikh PM' BEFORE the length guard so the 2-letter token survives", () => {
+      const parsed = parseRankQualifiedOffice("Who was the first Sikh PM of India?");
+      expect(parsed).not.toBeNull();
+      expect(parsed?.rank).toBe("first");
+      expect(parsed?.office).toBe("sikh prime minister");
+      expect(parsed?.officeNoun).toBe("minister");
+      expect(parsed?.qualifiers).toEqual(["sikh", "prime"]);
+      expect(parsed?.place).toBe("india");
+    });
+
+    it("non-regression: the full 'Sikh Prime Minister' form parses identically", () => {
+      const full = parseRankQualifiedOffice("Who was the first Sikh Prime Minister of India?");
+      const abbr = parseRankQualifiedOffice("Who was the first Sikh PM of India?");
+      expect(full).toEqual(abbr);
+    });
+
+    it("expands 'Sikh CM' through the shared vocabulary — not a PM-only patch", () => {
+      const parsed = parseRankQualifiedOffice("Who was the first Sikh CM of Punjab?");
+      expect(parsed).not.toBeNull();
+      expect(parsed?.office).toBe("sikh chief minister");
+      expect(parsed?.officeNoun).toBe("minister");
+      expect(parsed?.qualifiers).toEqual(["sikh", "chief"]);
+      expect(parsed?.place).toBe("punjab");
+    });
+
+    it("non-regression: the Hinglish 'India ka pehla Sikh PM kaun tha?' path still expands", () => {
+      const parsed = parseHinglishRankQualifiedOffice("India ka pehla Sikh PM kaun tha?");
+      expect(parsed).not.toBeNull();
+      expect(parsed?.office).toBe("sikh prime minister");
+      expect(parsed?.officeNoun).toBe("minister");
+      expect(parsed?.qualifiers).toEqual(["sikh", "prime"]);
+      expect(parsed?.place).toBe("india");
+    });
+
+    it("officeNounOf derives the noun from the EXPANDED phrase too", () => {
+      expect(officeNounOf("Who was the first Sikh PM of India?")).toBe("minister");
+      expect(officeNounOf("Who was the first Sikh Prime Minister of India?")).toBe("minister");
+      expect(officeNounOf("Who was the first Sikh CM of Punjab?")).toBe("minister");
+    });
+
+    it("classifyKnowledgeQuery routes the abbreviated form as rank-qualified with the expanded noun", () => {
+      const cls = classifyKnowledgeQuery("Who was the first Sikh PM of India?");
+      expect(cls.kind).toBe("rank-qualified");
+      expect(cls.office).toBe("sikh prime minister");
+      expect(cls.officeNoun).toBe("minister");
+      expect(cls.qualifiers).toEqual(["sikh", "prime"]);
+      expect(cls.place).toBe("india");
+    });
+  });
 });
 
 describe("parseHinglishRankQualifiedOffice", () => {
@@ -287,6 +339,113 @@ describe("enrichSearchQuery", () => {
   });
 });
 
+describe("matrix: office forms × place forms × question templates", () => {
+  // Every office phrase below must resolve to the SAME canonical English
+  // phrase regardless of abbreviation ("PM"), Hinglish word ("pradhan mantri")
+  // or attached qualifier ("Sikh PM") — proving the parser genuinely goes
+  // through the shared expandHinglishOffice vocabulary, not one-off patches.
+  const OFFICE_FORMS: Array<{ form: string; office: string; officeNoun: string; qualifiers: string[] }> = [
+    { form: "PM", office: "prime minister", officeNoun: "minister", qualifiers: ["prime"] },
+    { form: "pm", office: "prime minister", officeNoun: "minister", qualifiers: ["prime"] },
+    { form: "prime minister", office: "prime minister", officeNoun: "minister", qualifiers: ["prime"] },
+    { form: "pradhan mantri", office: "prime minister", officeNoun: "minister", qualifiers: ["prime"] },
+    { form: "pradhanmantri", office: "prime minister", officeNoun: "minister", qualifiers: ["prime"] },
+    { form: "CM", office: "chief minister", officeNoun: "minister", qualifiers: ["chief"] },
+    { form: "chief minister", office: "chief minister", officeNoun: "minister", qualifiers: ["chief"] },
+    { form: "mukhya mantri", office: "chief minister", officeNoun: "minister", qualifiers: ["chief"] },
+    { form: "mukhyamantri", office: "chief minister", officeNoun: "minister", qualifiers: ["chief"] },
+    { form: "VP", office: "vice president", officeNoun: "president", qualifiers: ["vice"] },
+    { form: "vice president", office: "vice president", officeNoun: "president", qualifiers: ["vice"] },
+    { form: "uprashtrapati", office: "vice president", officeNoun: "president", qualifiers: ["vice"] },
+    { form: "rashtrapati", office: "president", officeNoun: "president", qualifiers: [] },
+    { form: "president", office: "president", officeNoun: "president", qualifiers: [] },
+    { form: "Sikh PM", office: "sikh prime minister", officeNoun: "minister", qualifiers: ["sikh", "prime"] },
+    { form: "Sikh pradhan mantri", office: "sikh prime minister", officeNoun: "minister", qualifiers: ["sikh", "prime"] },
+    { form: "Sikh CM", office: "sikh chief minister", officeNoun: "minister", qualifiers: ["sikh", "chief"] },
+  ];
+
+  const PLACE_FORMS: Array<{ form: string; place: string; canonicalPlace: string | null }> = [
+    { form: "India", place: "india", canonicalPlace: null },
+    { form: "Bharat", place: "bharat", canonicalPlace: "India" },
+    { form: "Hindustan", place: "hindustan", canonicalPlace: "India" },
+    { form: "USA", place: "usa", canonicalPlace: "United States" },
+    { form: "United Kingdom", place: "united kingdom", canonicalPlace: "United Kingdom" },
+  ];
+
+  const EN_TEMPLATES: Array<{ label: string; rank: string; build: (office: string, place: string) => string }> = [
+    { label: "who was the first", rank: "first", build: (o, p) => `Who was the first ${o} of ${p}?` },
+    { label: "who is the first", rank: "first", build: (o, p) => `Who is the first ${o} of ${p}?` },
+    { label: "who was the last", rank: "last", build: (o, p) => `Who was the last ${o} of ${p}?` },
+  ];
+
+  const HI_TEMPLATES: Array<{ label: string; build: (place: string, office: string) => string }> = [
+    { label: "<place> ka pehla <office> kaun tha?", build: (p, o) => `${p} ka pehla ${o} kaun tha?` },
+    { label: "kaun tha <place> ka pehla <office>?", build: (p, o) => `kaun tha ${p} ka pehla ${o}?` },
+  ];
+
+  const englishCases = OFFICE_FORMS.flatMap((of) =>
+    PLACE_FORMS.flatMap((pf) =>
+      EN_TEMPLATES.map((t) => ({
+        name: `EN[${t.label}] ${of.form} × ${pf.form}`,
+        question: t.build(of.form, pf.form),
+        rank: t.rank,
+        office: of.office,
+        officeNoun: of.officeNoun,
+        qualifiers: of.qualifiers,
+        place: pf.place,
+        canonicalPlace: pf.canonicalPlace,
+      }))
+    )
+  );
+
+  it.each(englishCases)("English: $name", (c) => {
+    const parsed = parseRankQualifiedOffice(c.question);
+    expect(parsed).not.toBeNull();
+    expect(parsed?.rank).toBe(c.rank);
+    expect(parsed?.office).toBe(c.office);
+    expect(parsed?.officeNoun).toBe(c.officeNoun);
+    expect(parsed?.qualifiers).toEqual(c.qualifiers);
+    expect(parsed?.place).toBe(c.place);
+    expect(parsed?.canonicalPlace).toBe(c.canonicalPlace);
+    const cls = classifyKnowledgeQuery(c.question);
+    expect(cls.kind).toBe("rank-qualified");
+    expect(cls.officeNoun).toBe(c.officeNoun);
+    expect(cls.office).toBe(c.office);
+  });
+
+  // Hinglish templates use place names that pass the Hinglish possessive and
+  // the pronoun guard ("the united states" trips \bthe\b) — the same English
+  // office-form and canonicalization expectations must hold on this path.
+  const hinglishPlaces = PLACE_FORMS.filter((pf) => ["India", "Bharat", "Hindustan"].includes(pf.form));
+  const hinglishCases = OFFICE_FORMS.flatMap((of) =>
+    hinglishPlaces.flatMap((pf) =>
+      HI_TEMPLATES.map((t) => ({
+        name: `HI[${t.label}] ${of.form} × ${pf.form}`,
+        question: t.build(pf.form, of.form),
+        office: of.office,
+        officeNoun: of.officeNoun,
+        qualifiers: of.qualifiers,
+        place: pf.place,
+        canonicalPlace: pf.canonicalPlace,
+      }))
+    )
+  );
+
+  it.each(hinglishCases)("Hinglish: $name", (c) => {
+    const parsed = parseHinglishRankQualifiedOffice(c.question);
+    expect(parsed).not.toBeNull();
+    expect(parsed?.rank).toBe("first");
+    expect(parsed?.office).toBe(c.office);
+    expect(parsed?.officeNoun).toBe(c.officeNoun);
+    expect(parsed?.qualifiers).toEqual(c.qualifiers);
+    expect(parsed?.place).toBe(c.place);
+    expect(parsed?.canonicalPlace).toBe(c.canonicalPlace);
+    const cls = classifyKnowledgeQuery(c.question);
+    expect(cls.kind).toBe("rank-qualified");
+    expect(cls.officeNoun).toBe(c.officeNoun);
+  });
+});
+
 describe("text utilities", () => {
   it("escapes regex metacharacters", () => {
     expect(escapeRegExp("a.b")).toBe("a\\.b");
@@ -319,6 +478,11 @@ describe("shared vocabularies", () => {
     expect(FACT_LOOKUP_TERMS).toContain("prime\\s+minister");
     expect(FACT_LOOKUP_TERMS).toContain("pradhan\\s+mantri");
     expect(FACT_LOOKUP_TERMS).toContain("rajdhani");
+    // Abbreviated office forms route the Hinglish detector to web_search too;
+    // the web toolkit's expandHinglishOffice expands them before parsing.
+    expect(FACT_LOOKUP_TERMS).toContain("pm");
+    expect(FACT_LOOKUP_TERMS).toContain("cm");
+    expect(FACT_LOOKUP_TERMS).toContain("vp");
     expect(new Set(FACT_LOOKUP_TERMS).size).toBe(FACT_LOOKUP_TERMS.length);
   });
 

@@ -235,6 +235,12 @@ export function expandHinglishOffice(office: string): string {
 export const FACT_LOOKUP_TERMS: readonly string[] = [
   "prime\\s+minister",
   "president",
+  // Abbreviated office forms, so the planner's Hinglish detector routes
+  // "India ka pehla Sikh PM kaun tha?" to web_search too; the web toolkit's
+  // shared expandHinglishOffice expands them before parsing.
+  "pm",
+  "cm",
+  "vp",
   "capital",
   "population",
   "history",
@@ -335,13 +341,16 @@ export function properNounsOf(query: string): string[] {
 
 /**
  * Core office noun of a rank-qualified question ("...first sikh prime minister of india" → "minister").
+ * The captured office phrase is expanded ("sikh pm" → "sikh prime minister") before the
+ * length filter so abbreviations survive it — the same expansion every other parser applies.
  */
 export function officeNounOf(q: string): string | null {
   const m = normalizeQueryText(q).match(
     /\bwho\s+(?:is|was)\s+(?:the\s+)?(?:first|last|previous|former|next|oldest|youngest|earliest|latest|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(.+?)\s+of\s+(.+?)\s*[?.!]?\s*$/
   );
   if (!m) return null;
-  const words = m[1].trim().split(/\s+/).filter((w) => w.length >= 3);
+  const office = expandHinglishOffice(m[1].trim());
+  const words = office.split(/\s+/).filter((w) => w.length >= 3);
   return words[words.length - 1] ?? null;
 }
 
@@ -366,12 +375,19 @@ export function parseRankQualifiedOffice(q: string): RankQualifiedOffice | null 
   );
   if (!m) return null;
   const rank = m[1];
-  const office = m[2].trim();
+  let office = m[2].trim();
   const place = m[3].trim();
-  if (office.length < 3 || place.length < 2) return null;
+  if (place.length < 2) return null;
   if (/\b(?:you|this|that|it|there)\b/.test(place)) return null;
+  // Expand short forms ("pm" → "prime minister") and Hindi office phrases
+  // ("pradhan mantri") BEFORE the length guard so abbreviations survive it —
+  // the same expansion the Hinglish parser applies. officeNoun and qualifiers
+  // are then derived from the EXPANDED phrase, never the raw capture.
+  office = expandHinglishOffice(office);
+  if (office.length < 3) return null;
   const words = office.split(/\s+/).filter((w) => w.length >= 3 && !SEARCH_STOPWORDS.has(w));
   const officeNoun = words[words.length - 1] ?? "";
+  if (!officeNoun) return null;
   return {
     rank,
     office,

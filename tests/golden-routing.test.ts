@@ -158,6 +158,18 @@ const ROUTING_REGRESSIONS: GoldenCase[] = [
 ];
 
 /**
+ * The 4 user regression strings for abbreviation expansion. All must route to
+ * web_search — including the Hinglish abbreviated form, whose detector
+ * vocabulary is the shared FACT_LOOKUP_TERMS (now including pm/cm/vp).
+ */
+const ABBREVIATION_REGRESSIONS: GoldenCase[] = [
+  { question: "Who was the first Sikh PM of India?", expected: "search" },
+  { question: "Who was the first Sikh Prime Minister of India?", expected: "search" },
+  { question: "Who was the first Sikh CM of Punjab?", expected: "search" },
+  { question: "India ka pehla Sikh PM kaun tha?", expected: "search" },
+];
+
+/**
  * The exact 8-question acceptance set that triggered the routing/handling
  * overhaul. "What is not X" must reason (the web surfaces unrelated pages);
  * rank-qualified office questions still probe search first (then defer when
@@ -199,6 +211,7 @@ describeCases("vision canary (must never be vision)", VISION_CANARIES);
 describeCases("exact 10-question sequence", SEQUENCE_10);
 describeCases("the 8-question acceptance set", EIGHT_QUESTIONS);
 describeCases("routing regressions (hijack-proofed)", ROUTING_REGRESSIONS);
+describeCases("abbreviation regressions (Sikh PM of India)", ABBREVIATION_REGRESSIONS);
 
 describe("vision classifier verdict per canary (component-level)", () => {
   for (const c of VISION_CANARIES) {

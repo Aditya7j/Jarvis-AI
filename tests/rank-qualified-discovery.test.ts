@@ -296,6 +296,20 @@ describe("Hinglish and 'PM' abbreviation use the SAME discovery pipeline", () =>
     expect(result?.heading).toBe("Manmohan Singh");
     expect(result?.abstract).toContain("Sikh prime minister of India");
   });
+
+  it("Who was the first Sikh PM of India? (English abbreviation) -> Manmohan Singh", async () => {
+    SEARCH_RESPONSES.set(
+      "search:who was the first sikh pm of india",
+      searchResult(["Khalistan movement"])
+    );
+    SEARCH_RESPONSES.set(`search:${SIKH_CANONICAL_QUERY}`, searchResult(["Manmohan Singh"]));
+    SEARCH_RESPONSES.set("lead:Khalistan movement", KHALISTAN_LEAD);
+    SEARCH_RESPONSES.set("lead:Manmohan Singh", MANMOHAN_LEAD);
+
+    const result = await webSearch("Who was the first Sikh PM of India?");
+    expect(result?.heading).toBe("Manmohan Singh");
+    expect(result?.abstract).toContain("Sikh prime minister of India");
+  });
 });
 
 describe("honest refusal is preserved after all discovery is exhausted", () => {
