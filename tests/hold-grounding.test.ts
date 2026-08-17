@@ -456,4 +456,58 @@ describe("groundHeldVlmTiered — two-tier grounding", () => {
     expect(verdict.accepted).toBe(false);
     expect(verdict.reason).toBe("blocked by strong detector evidence");
   });
+
+  it("vlm-only: accepts an ID card when the detector sees nothing (happy path)", () => {
+    const verdict = groundHeldVlmTiered(
+      "id card",
+      true,
+      "A white ID card is clearly visible in the person's right hand.",
+      emptyEvidence
+    );
+    expect(verdict).toEqual({
+      accepted: true,
+      canonical: null,
+      tier: "vlm-only",
+      reason: "vlm-only, no detector evidence",
+    });
+  });
+
+  it("vlm-only: strong detector misclassification of ID card as cell phone blocks the VLM answer", () => {
+    const cellPhoneEvidence = {
+      labels: new Set(["cell phone"]),
+      labelConfidence: new Map([["cell phone", 0.45]]),
+      region: { x: 30, y: 140, width: 140, height: 260 },
+      hasPerson: true,
+    };
+    const verdict = groundHeldVlmTiered(
+      "id card",
+      true,
+      "A white ID card is clearly visible in the person's right hand.",
+      cellPhoneEvidence
+    );
+    expect(verdict.accepted).toBe(false);
+    expect(verdict.tier).toBeNull();
+    expect(verdict.reason).toBe("blocked by strong detector evidence");
+  });
+
+  it("vlm-only: weak detector misclassification (cell phone at 0.30) does NOT block the VLM ID card answer", () => {
+    const weakCellPhoneEvidence = {
+      labels: new Set(["cell phone"]),
+      labelConfidence: new Map([["cell phone", 0.30]]),
+      region: { x: 30, y: 140, width: 140, height: 260 },
+      hasPerson: true,
+    };
+    const verdict = groundHeldVlmTiered(
+      "id card",
+      true,
+      "A white ID card is clearly visible in the person's right hand.",
+      weakCellPhoneEvidence
+    );
+    expect(verdict).toEqual({
+      accepted: true,
+      canonical: null,
+      tier: "vlm-only",
+      reason: "vlm-only, weak conflicting evidence",
+    });
+  });
 });

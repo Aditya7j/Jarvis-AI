@@ -26,6 +26,10 @@ export interface ScenePerson extends TrackedObject {
   heldHint?: string;
   /** Padded hand/lap region (frame pixels) used for held-object detection. */
   handRegion?: { x: number; y: number; width: number; height: number };
+  /** VLM-determined garment type (t-shirt, hoodie, jacket, …). Undefined = never checked; null = checked but unknown. */
+  garmentType?: string | null;
+  /** Timestamp (ms) when garmentType was last determined by the VLM. Used for TTL on "checked, still unknown". */
+  garmentTypeCheckedAt?: number;
 }
 
 export interface FaceSighting {
@@ -118,6 +122,13 @@ const EMPTY_STATS: VisionStats = {
   roiHits: 0,
 };
 
+/**
+ * TTL for a "checked but unknown" garment type before re-escalating to the VLM.
+ * Avoids hammering the VLM every turn when it genuinely can't determine the type,
+ * while still re-checking if the scene changes enough to warrant a new attempt.
+ */
+const GARMENT_TYPE_TTL_MS = 15_000;
+
 class VisionStateStore {
   private state: VisionStateSnapshot = {
     latestObjects: {},
@@ -140,15 +151,33 @@ class VisionStateStore {
     heldCandidates: null,
   };
 
+  /**
+   * VLM-determined garment types persisted across frame updates. Keyed by
+   * person trackingId. Entries are cleaned up when the person disappears from
+   * the tracker or when the state is reset.
+   */
+  private garmentTypes: Map<number, { garmentType: string | null; checkedAt: number }> = new Map();
+
   update(input: SceneUpdateInput): VisionStateSnapshot {
     const objects: Record<number, SceneObject> = {};
     for (const o of input.objects) {
       objects[o.trackingId] = { ...o, color: input.colors[`object-${o.trackingId}`] ?? o.color };
     }
-    const people = input.people.map((p) => ({
-      ...p,
-      shirtColor: input.colors[`person-${p.trackingId}-shirt`] ?? p.shirtColor,
-    }));
+    const people = input.people.map((p) => {
+      const cached = this.garmentTypes.get(p.trackingId);
+      return {
+        ...p,
+        shirtColor: input.colors[`person-${p.trackingId}-shirt`] ?? p.shirtColor,
+        garmentType: cached ? cached.garmentType : p.garmentType,
+        garmentTypeCheckedAt: cached ? cached.checkedAt : p.garmentTypeCheckedAt,
+      };
+    });
+
+    // Clean up garment type entries for people who are no longer tracked.
+    const activeIds = new Set(input.people.map((p) => p.trackingId));
+    for (const id of this.garmentTypes.keys()) {
+      if (!activeIds.has(id)) this.garmentTypes.delete(id);
+    }
 
     this.state = {
       latestObjects: objects,
@@ -181,6 +210,7 @@ class VisionStateStore {
 
   /** Clear the entire scene. Called when the camera closes or a new session starts. */
   reset(): void {
+    this.garmentTypes.clear();
     this.state = {
       latestObjects: {},
       latestPeople: [],
@@ -222,6 +252,30 @@ class VisionStateStore {
       ...this.state,
       lastGemma: { at: Date.now(), reason },
     };
+  }
+
+  /**
+   * Cache a VLM-determined garment type for a tracked person. Persists across
+   * frame updates so subsequent "what am I wearing?" calls answer instantly
+   * without re-escalating to the VLM. A null value means "checked, still
+   * unknown" and expires after GARMENT_TYPE_TTL_MS.
+   */
+  setGarmentType(trackingId: number, garmentType: string | null): void {
+    this.garmentTypes.set(trackingId, { garmentType, checkedAt: Date.now() });
+    // Also update the current snapshot so the next read sees it immediately.
+    const people = this.state.latestPeople.map((p) => {
+      if (p.trackingId !== trackingId) return p;
+      return { ...p, garmentType, garmentTypeCheckedAt: Date.now() };
+    });
+    this.state = { ...this.state, latestPeople: people };
+  }
+
+  /** Whether the garment type cache for a person has expired (or was never set). */
+  garmentTypeExpired(trackingId: number): boolean {
+    const entry = this.garmentTypes.get(trackingId);
+    if (!entry) return true;
+    if (entry.garmentType !== null) return false; // positive result never expires
+    return Date.now() - entry.checkedAt > GARMENT_TYPE_TTL_MS;
   }
 
   /** Snapshot of the currently visible objects with counts. */

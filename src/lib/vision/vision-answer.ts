@@ -121,12 +121,32 @@ function formatObjectList(visible: { name: string; count: number }[], personCoun
   return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }
 
-function clothingSentence(state: VisionStateSnapshot): string | null {
+function clothingSentence(state: VisionStateSnapshot): { text: string; needsVlm: boolean } | null {
   const person = state.latestPeople[0];
   if (!person) return null;
   const shirt = person.shirtColor;
   if (!shirt) return null;
-  return `You're wearing a ${shirt.name} top.`;
+
+  const garmentType = person.garmentType;
+  const store = getVisionStateStore();
+
+  // Garment type never checked → escalate so VLM can determine it.
+  if (garmentType === undefined) {
+    return { text: `You're wearing a ${shirt.name} top.`, needsVlm: true };
+  }
+
+  // Garment type checked but unknown, and TTL expired → re-check.
+  if (garmentType === null && store.garmentTypeExpired(person.trackingId)) {
+    return { text: `You're wearing a ${shirt.name} top.`, needsVlm: true };
+  }
+
+  // Both known → full sentence with specific garment type.
+  if (garmentType) {
+    return { text: `You're wearing a ${shirt.name} ${garmentType}.`, needsVlm: false };
+  }
+
+  // Garment type unknown but within TTL → honest fallback, no re-escalation.
+  return { text: `You're wearing a ${shirt.name} top.`, needsVlm: false };
 }
 
 /**
@@ -255,8 +275,8 @@ export function answerFromVisionCache(prompt: string): SimpleVisionAnswer {
         fromCache: true,
       };
     }
-    const sentence = clothingSentence(state);
-    if (!sentence) {
+    const clothing = clothingSentence(state);
+    if (!clothing) {
       // A person is visible but YOLO hasn't established a shirt colour. YOLO
       // must never guess an attribute it didn't detect — one bounded, focused
       // VLM call on the newest frame is the only allowed escalation, and it
@@ -269,7 +289,20 @@ export function answerFromVisionCache(prompt: string): SimpleVisionAnswer {
         fromCache: false,
       };
     }
-    return finalize(sentence, 85);
+    if (clothing.needsVlm) {
+      // Shirt colour is cached but garment type is not yet determined (or the
+      // TTL on a previous "unknown" result expired). Escalate once to the
+      // focused VLM so it can determine the garment type; subsequent asks
+      // will be instant once the VLM result is cached on the person state.
+      return {
+        text: clothing.text,
+        confidence: 40,
+        needsGemma: true,
+        escalation: "wearing",
+        fromCache: false,
+      };
+    }
+    return finalize(clothing.text, 85);
   }
 
   // --- Generic "what do you see / what's on my desk" list ---

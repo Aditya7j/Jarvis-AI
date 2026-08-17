@@ -43,6 +43,7 @@ import {
   resolveVisualQuestion,
   type VisionFrameInput,
 } from "@/lib/vision/vision-manager";
+import { getVisionStateStore } from "@/lib/vision/vision-state";
 import type { PipelineModel } from "./pipeline";
 
 const log = aiLogger.child("vision-resolution");
@@ -430,6 +431,29 @@ async function analyzeAndCachePlan(
         cameraSessionId,
         frameId,
       });
+      // Cache the VLM result on the person state so subsequent "what am I
+      // wearing?" calls answer instantly from the cache without re-escalating.
+      if (focus === "wearing") {
+        const store = getVisionStateStore();
+        const people = store.getState().latestPeople;
+        const person = people[0];
+        if (person) {
+          const shirtColor = focused.result.value
+            ? store.getState().latestColors[`person-${person.trackingId}-shirt`] ?? person.shirtColor
+            : person.shirtColor;
+          store.setGarmentType(person.trackingId, focused.result.garmentType ?? null);
+          // Also persist the shirt colour from the VLM if it wasn't already cached.
+          if (focused.result.value && !person.shirtColor) {
+            store.update({
+              objects: Object.values(store.getState().latestObjects),
+              people: [{ ...person, shirtColor: shirtColor ?? undefined }],
+              colors: store.getState().latestColors,
+              frameId: store.getState().frameId,
+              cameraSessionId: store.getState().cameraSessionId,
+            });
+          }
+        }
+      }
       return { systemContext, summary: cachedSummary, text: directText };
     }
     const result = await analyzeNewestFrame(frame, model, run.signal);
