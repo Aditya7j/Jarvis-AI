@@ -472,12 +472,12 @@ describe("webSearch Wikipedia fallback (mocked)", () => {
 });
 
 describe("anaphora resolution → search (integration)", () => {
-  it("resolves 'who created it?' to 'who created React?' via resolveAnaphoricQuery", () => {
+  it("resolves 'who created it?' with category qualifier via resolveAnaphoricQuery", () => {
     const resolved = resolveAnaphoricQuery("who created it?", [
       { role: "user", content: "What is React?" },
       { role: "assistant", content: "React is a JavaScript library." },
     ]);
-    expect(resolved).toBe("who created React?");
+    expect(resolved).toBe("who created React JavaScript library?");
   });
 
   it("resolves 'when was it released?' after 'what is Python?'", () => {
@@ -507,10 +507,11 @@ describe("anaphora resolution → search (integration)", () => {
   });
 
   it("full pipeline: 'what is React?' then 'who created it?' resolves and searches", async () => {
-    // After resolution, the query is "who created React?" — Wikipedia should
-    // return the React article, not the Carnatic music composers page.
+    // After resolution with category disambiguation, the query is
+    // "who created React JavaScript library?" — Wikipedia should return the
+    // React article, not the Carnatic music composers page.
     SEARCH_RESPONSES.set(
-      "search:who created React",
+      "search:who created React JavaScript library",
       searchResult(["React (JavaScript library)", "Facebook", "Jordan Walke"])
     );
     SEARCH_RESPONSES.set(
@@ -523,7 +524,7 @@ describe("anaphora resolution → search (integration)", () => {
       { role: "user", content: "What is React?" },
       { role: "assistant", content: "React is a JavaScript library." },
     ]);
-    expect(resolved).toBe("who created React?");
+    expect(resolved).toBe("who created React JavaScript library?");
     const result = await webSearch(resolved);
     expect(result?.heading).toBe("React (JavaScript library)");
     expect(result?.abstract).toContain("Jordan Walke");
@@ -544,5 +545,34 @@ describe("anaphora resolution → search (integration)", () => {
       { role: "user", content: "What is the capital of India?" },
     ]);
     expect(resolved).toBe("who is the current prime minister?");
+  });
+
+  it("disambiguates Python (programming language) from snake/Monty Python", async () => {
+    // Python is genuinely ambiguous — the programming language, the snake, and
+    // Monty Python. The category qualifier from the assistant's answer
+    // disambiguates the search query so it doesn't collide with unrelated results.
+    SEARCH_RESPONSES.set(
+      "search:who created Python programming language",
+      searchResult(["Python (programming language)", "Guido van Rossum", "ABC language"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:Python (programming language)",
+      "Python is a high-level programming language. It was created by Guido van Rossum and first released in 1991."
+    );
+    const resolved = resolveAnaphoricQuery("who created it?", [
+      { role: "user", content: "What is Python?" },
+      { role: "assistant", content: "Python is a programming language." },
+    ]);
+    expect(resolved).toBe("who created Python programming language?");
+    const result = await webSearch(resolved);
+    expect(result?.heading).toBe("Python (programming language)");
+    expect(result?.abstract).toContain("Guido van Rossum");
+  });
+
+  it("does not add category qualifier when no assistant message provides one", () => {
+    const resolved = resolveAnaphoricQuery("who created it?", [
+      { role: "user", content: "What is React?" },
+    ]);
+    expect(resolved).toBe("who created React?");
   });
 });

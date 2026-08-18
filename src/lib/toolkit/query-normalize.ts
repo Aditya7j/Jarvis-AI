@@ -445,10 +445,79 @@ export function topicSubjectOf(messages: Array<{ role: string; content: string }
 }
 
 /**
+ * Extract a short category/domain phrase from assistant messages for a given
+ * subject, used to disambiguate short, ambiguous topic names (e.g. "React",
+ * "Python", "Go", "Rust") in follow-up search queries.
+ *
+ * Matches the "X is a/an [category]" sentence pattern in assistant messages:
+ *   "React is a JavaScript library" → "JavaScript library"
+ *   "Python is a programming language" → "programming language"
+ *   "Go is a statically typed language" → "statically typed language"
+ *   "Django is a Python web framework" → "Python web framework"
+ *
+ * Also handles Hinglish patterns:
+ *   "React ek JavaScript library hai" → "JavaScript library"
+ *   "Go ek statically typed language hai" → "statically typed language"
+ *
+ * Returns null when no recognizable category can be extracted.
+ */
+export function topicCategoryFromHistory(
+  subject: string,
+  allMessages: Array<{ role: string; content: string }>
+): string | null {
+  if (!subject || subject.length < 2) return null;
+
+  // Escape the subject for use in a regex, handling word boundaries and
+  // possessive forms ("React's").
+  const escaped = escapeRegExp(subject.replace(/['']s$/i, ""));
+  // Capture the category phrase up to a sentence-ending punctuation mark or
+  // natural phrase boundary. Stop at common prepositions that introduce
+  // trailing modifiers ("for building…", "developed by…", "known for…") to
+  // keep the category concise for search disambiguation.
+  const categoryRe = `(.+?)\\s*(?:\\b(?:for|with|that|which|known|developed)\\s|[.!?;,]|$)`;
+  // "is" or "was" with mandatory article for "was" (to reject "was created by…"
+  // or "was founded by…" which are action sentences, not category definitions).
+  const subjectRe = new RegExp(
+    `^${escaped}\\s+is\\s+(?:a|an|the)?\\s*${categoryRe}|^${escaped}\\s+was\\s+(?:a|an|the)\\s*${categoryRe}`,
+    "i"
+  );
+  const hinglishRe = new RegExp(`^${escaped}\\s+ek\\s+(.+?)\\b\\s+hai\\b`, "i");
+
+  // Scan assistant messages in reverse (most recent first).
+  for (let i = allMessages.length - 1; i >= 0; i--) {
+    const msg = allMessages[i];
+    if (msg.role !== "assistant" || !msg.content) continue;
+    const text = msg.content.trim();
+
+    // Match against the first sentence (up to the first period/question mark/exclamation).
+    const firstSentence = text.match(/^[^.?!]+[.?!]?/)?.[0] ?? text;
+    const m = firstSentence.match(subjectRe);
+    if (m) {
+      const category = (m[1] ?? m[2] ?? "").trim();
+      if (category.length >= 3) return category;
+    }
+
+    // Hinglish pattern.
+    const hm = text.match(hinglishRe);
+    if (hm) {
+      const category = (hm[1] ?? hm[2] ?? "").trim();
+      if (category.length >= 3) return category;
+    }
+  }
+  return null;
+}
+
+/**
  * Conversation-aware anaphora resolution: when the current question contains
  * an unresolved pronoun ("who created it?", "how does that work?") and a prior
  * turn established a topic, substitute the pronoun with the resolved subject
  * so the search query is grounded.
+ *
+ * When the assistant's prior answer for the topic contains a recognizable
+ * category/domain phrase (e.g. "React is a JavaScript library"), a short
+ * disambiguating qualifier is appended to the resolved query — e.g. rewriting
+ * "who created it?" to "who created React JavaScript library?" — to avoid
+ * collisions with unrelated results sharing the same bare noun.
  *
  * Returns the enriched query, or the original query unchanged when no prior
  * topic can be confidently identified.
@@ -460,6 +529,12 @@ export function resolveAnaphoricQuery(
   if (!hasUnresolvedAnaphora(query)) return query;
   const subject = topicSubjectOf(allMessages);
   if (!subject) return query;
+
+  // Try to extract a category qualifier from the assistant's prior answer.
+  // This disambiguates short, ambiguous topic names (React, Python, Go, etc.)
+  // that map to multiple unrelated Wikipedia articles.
+  const category = topicCategoryFromHistory(subject, allMessages);
+
   // Replace the first anaphoric pronoun with the resolved subject.
   // The subject preserves its original casing from the conversation history
   // (e.g. "React" from "What is React?" — never lowercased).
@@ -472,7 +547,37 @@ export function resolveAnaphoricQuery(
   for (const pattern of patterns) {
     const match = query.match(pattern);
     if (match) {
-      return query.replace(pattern, subject);
+      let resolved = query.replace(pattern, subject);
+      // Append the category qualifier if it adds disambiguation beyond the
+      // bare subject name. Only append when the category is a distinct phrase
+      // that doesn't merely restate what's already in the query.
+      if (category) {
+        const categoryLower = category.toLowerCase();
+        // Don't append if the category is already present in the query.
+        if (!resolved.toLowerCase().includes(categoryLower)) {
+          // Insert the category right after the subject name so it applies
+          // consistently to both English and Hinglish query structures:
+          //   "who created React?" → "who created React JavaScript library?"
+          //   "React kaun hai?"   → "React JavaScript library kaun hai?"
+          // This ensures the disambiguation is always close to the subject,
+          // and punctuation (?/.) stays at the end of the query.
+          const subjectIdx = resolved.toLowerCase().indexOf(subject.toLowerCase());
+          if (subjectIdx >= 0) {
+            const insertAt = subjectIdx + subject.length;
+            const before = resolved.slice(0, insertAt);
+            const after = resolved.slice(insertAt);
+            return `${before} ${category}${after}`;
+          }
+          // Fallback: append at end with punctuation handling.
+          const trailingPunct = resolved.match(/([?!.]+)\s*$/);
+          if (trailingPunct) {
+            resolved = resolved.replace(/[?!.]+\s*$/, "").trimEnd();
+            return `${resolved} ${category}${trailingPunct[1]}`;
+          }
+          return `${resolved} ${category}`;
+        }
+      }
+      return resolved;
     }
   }
   return query;

@@ -38,6 +38,7 @@ import {
   titleCase,
   tokenInTitle,
   tokenizeWords,
+  topicCategoryFromHistory,
   topicSubjectOf,
 } from "@/lib/toolkit/query-normalize";
 
@@ -595,12 +596,12 @@ describe("topicSubjectOf", () => {
 });
 
 describe("resolveAnaphoricQuery", () => {
-  it("resolves 'who created it?' to 'who created React?'", () => {
+  it("resolves 'who created it?' with category qualifier when assistant provided one", () => {
     const result = resolveAnaphoricQuery("who created it?", [
       { role: "user", content: "What is React?" },
       { role: "assistant", content: "React is a JavaScript library." },
     ]);
-    expect(result).toBe("who created React?");
+    expect(result).toBe("who created React JavaScript library?");
   });
 
   it("resolves 'when was it released?' to 'when was React released?'", () => {
@@ -651,13 +652,13 @@ describe("resolveAnaphoricQuery", () => {
     expect(result).toBe("who is the current prime minister?");
   });
 
-  it("handles different topics across turns", () => {
+  it("handles different topics across turns with category qualifier", () => {
     const result = resolveAnaphoricQuery("who created it?", [
       { role: "user", content: "What is Python?" },
       { role: "assistant", content: "Python is a programming language." },
       { role: "user", content: "Who created it?" },
     ]);
-    expect(result).toBe("who created Python?");
+    expect(result).toBe("who created Python programming language?");
   });
 
   it("handles 'that' pronoun", () => {
@@ -672,5 +673,150 @@ describe("resolveAnaphoricQuery", () => {
       { role: "user", content: "What are the FAANG companies?" },
     ]);
     expect(result).toBe("who founded FAANG companies?");
+  });
+});
+
+describe("topicCategoryFromHistory", () => {
+  it("extracts 'JavaScript library' from 'React is a JavaScript library.'", () => {
+    expect(
+      topicCategoryFromHistory("React", [
+        { role: "assistant", content: "React is a JavaScript library for building user interfaces." },
+      ])
+    ).toBe("JavaScript library");
+  });
+
+  it("extracts 'programming language' from 'Python is a programming language.'", () => {
+    expect(
+      topicCategoryFromHistory("Python", [
+        { role: "assistant", content: "Python is a programming language known for its readability." },
+      ])
+    ).toBe("programming language");
+  });
+
+  it("extracts 'statically typed language' from Go definition", () => {
+    expect(
+      topicCategoryFromHistory("Go", [
+        { role: "assistant", content: "Go is a statically typed language developed by Google." },
+      ])
+    ).toBe("statically typed language");
+  });
+
+  it("extracts 'Python web framework' from Django definition", () => {
+    expect(
+      topicCategoryFromHistory("Django", [
+        { role: "assistant", content: "Django is a Python web framework for building web applications." },
+      ])
+    ).toBe("Python web framework");
+  });
+
+  it("handles Hinglish pattern 'React ek JavaScript library hai'", () => {
+    expect(
+      topicCategoryFromHistory("React", [
+        { role: "assistant", content: "React ek JavaScript library hai jo user interfaces banane ke liye use hoti hai." },
+      ])
+    ).toBe("JavaScript library");
+  });
+
+  it("handles Hinglish pattern 'Go ek statically typed language hai'", () => {
+    expect(
+      topicCategoryFromHistory("Go", [
+        { role: "assistant", content: "Go ek statically typed language hai jo Google ne banaya hai." },
+      ])
+    ).toBe("statically typed language");
+  });
+
+  it("returns null when no assistant message contains a category", () => {
+    expect(
+      topicCategoryFromHistory("React", [
+        { role: "user", content: "What is React?" },
+      ])
+    ).toBeNull();
+  });
+
+  it("returns null when subject is too short", () => {
+    expect(topicCategoryFromHistory("", [])).toBeNull();
+    expect(topicCategoryFromHistory("a", [])).toBeNull();
+  });
+
+  it("uses most recent assistant message when multiple match", () => {
+    expect(
+      topicCategoryFromHistory("React", [
+        { role: "assistant", content: "React is a UI library." },
+        { role: "assistant", content: "React is a JavaScript library for building user interfaces." },
+      ])
+    ).toBe("JavaScript library");
+  });
+
+  it("returns null when assistant message has no 'is a/an' pattern for the subject", () => {
+    expect(
+      topicCategoryFromHistory("React", [
+        { role: "assistant", content: "React was created by Jordan Walke at Facebook in 2013." },
+      ])
+    ).toBeNull();
+  });
+});
+
+describe("resolveAnaphoricQuery — disambiguation", () => {
+  it("appends category qualifier from assistant answer (React)", () => {
+    const result = resolveAnaphoricQuery("who created it?", [
+      { role: "user", content: "What is React?" },
+      { role: "assistant", content: "React is a JavaScript library." },
+    ]);
+    expect(result).toBe("who created React JavaScript library?");
+  });
+
+  it("appends category qualifier (Python programming language)", () => {
+    const result = resolveAnaphoricQuery("who created it?", [
+      { role: "user", content: "What is Python?" },
+      { role: "assistant", content: "Python is a programming language." },
+    ]);
+    expect(result).toBe("who created Python programming language?");
+  });
+
+  it("appends category qualifier (Django web framework)", () => {
+    const result = resolveAnaphoricQuery("who created it?", [
+      { role: "user", content: "What is Django?" },
+      { role: "assistant", content: "Django is a Python web framework." },
+    ]);
+    expect(result).toBe("who created Django Python web framework?");
+  });
+
+  it("does not append qualifier when assistant answer has no category pattern", () => {
+    const result = resolveAnaphoricQuery("who created it?", [
+      { role: "user", content: "What is React?" },
+      { role: "assistant", content: "React was created by Jordan Walke at Facebook." },
+    ]);
+    expect(result).toBe("who created React?");
+  });
+
+  it("does not duplicate qualifier already present in the query", () => {
+    const result = resolveAnaphoricQuery("what is React JavaScript library?", []);
+    // Not anaphoric, so unchanged.
+    expect(result).toBe("what is React JavaScript library?");
+  });
+
+  it("does not append category when it starts with the subject name", () => {
+    // "React is React framework" — category "React framework" starts with
+    // "React", so it adds disambiguation beyond the bare noun.
+    const result = resolveAnaphoricQuery("who created it?", [
+      { role: "user", content: "What is React?" },
+      { role: "assistant", content: "React is a React framework for UIs." },
+    ]);
+    expect(result).toBe("who created React React framework?");
+  });
+
+  it("works with Hinglish category extraction", () => {
+    const result = resolveAnaphoricQuery("iska kaun hai?", [
+      { role: "user", content: "React kya hai?" },
+      { role: "assistant", content: "React ek JavaScript library hai." },
+    ]);
+    expect(result).toBe("React JavaScript library kaun hai?");
+  });
+
+  it("does not break office follow-ups (no category injection)", () => {
+    const result = resolveAnaphoricQuery("who is the current prime minister?", [
+      { role: "user", content: "What is the capital of India?" },
+    ]);
+    expect(result).toBe("who is the current prime minister?");
   });
 });

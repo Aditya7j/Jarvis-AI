@@ -47,6 +47,7 @@ export {
   properNounsOf,
   queryKeywords,
   resolveAnaphoricQuery,
+  topicCategoryFromHistory,
   topicSubjectOf,
   type KnowledgeQuery,
   type KnowledgeQueryKind,
