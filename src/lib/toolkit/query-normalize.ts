@@ -158,18 +158,43 @@ const PLACE_ALIASES: Record<string, string> = {
   "u.a.e.": "United Arab Emirates",
   bharat: "India",
   hindustan: "India",
+  india: "India",
 };
+
+/**
+ * Typo-tolerant fallback for PLACE_ALIASES: a near-miss spelling (edit
+ * distance <= 2) of a known alias key or of a canonical place name still
+ * resolves correctly, so "inida"/"bharaat" route through the strict,
+ * validated capital/officeholder path instead of falling through to an
+ * unvalidated generic search. Reuses the existing `levenshtein` helper
+ * in this file rather than adding a second edit-distance implementation.
+ */
+function fuzzyPlaceOf(place: string): string | null {
+  const key = place.toLowerCase().trim().replace(/^the\s+/, "").trim();
+  if (key.length < 3) return null;
+  let best: string | null = null;
+  let bestDist = 3; // max allowed edit distance
+  for (const [alias, canonical] of Object.entries(PLACE_ALIASES)) {
+    const dist = levenshtein(key, alias);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = canonical;
+    }
+  }
+  return bestDist <= 2 ? best : null;
+}
 
 /**
  * The canonical Wikipedia article title for a place, so "what is the capital
  * of usa" reads the "United States" article (whose infobox carries the
- * `capital` field) instead of failing on the alias "usa". Returns null when
- * the place needs no normalization.
+ * `capital` field) instead of failing on the alias "usa". Tries an exact
+ * PLACE_ALIASES match first, then falls back to a typo-tolerant fuzzy match.
+ * Returns null when the place needs no normalization.
  */
 export function canonicalPlaceOf(place: string): string | null {
   const key = place.toLowerCase().trim().replace(/^the\s+/, "").trim();
   if (!key) return null;
-  return PLACE_ALIASES[key] ?? null;
+  return PLACE_ALIASES[key] ?? fuzzyPlaceOf(key);
 }
 
 /** Hinglish rank words mapped to the English content word articles use. */
