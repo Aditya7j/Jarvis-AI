@@ -20,6 +20,7 @@ import {
   anchorOf,
   properNounsOf,
   enrichSearchQuery,
+  resolveAnaphoricQuery,
   extractIncumbentName,
   extractCapitalName,
   webSearch,
@@ -467,5 +468,81 @@ describe("webSearch Wikipedia fallback (mocked)", () => {
     const result = await webSearch("who is the first sikh prime minister of india");
     expect(result?.heading).toBe("Manmohan Singh");
     expect(result?.abstract).toContain("prime minister");
+  });
+});
+
+describe("anaphora resolution → search (integration)", () => {
+  it("resolves 'who created it?' to 'who created React?' via resolveAnaphoricQuery", () => {
+    const resolved = resolveAnaphoricQuery("who created it?", [
+      { role: "user", content: "What is React?" },
+      { role: "assistant", content: "React is a JavaScript library." },
+    ]);
+    expect(resolved).toBe("who created React?");
+  });
+
+  it("resolves 'when was it released?' after 'what is Python?'", () => {
+    const resolved = resolveAnaphoricQuery("when was it released?", [
+      { role: "user", content: "What is Python?" },
+    ]);
+    expect(resolved).toBe("when was Python released?");
+  });
+
+  it("resolves 'how does it work?' after 'what is machine learning?'", () => {
+    const resolved = resolveAnaphoricQuery("how does it work?", [
+      { role: "user", content: "What is machine learning?" },
+    ]);
+    expect(resolved).toBe("how does machine learning work?");
+  });
+
+  it("resolves Hinglish 'yeh kisne banaya?' after 'React kya hai?'", () => {
+    const resolved = resolveAnaphoricQuery("yeh kisne banaya?", [
+      { role: "user", content: "React kya hai?" },
+    ]);
+    expect(resolved).toBe("React kisne banaya?");
+  });
+
+  it("degrades gracefully when no prior topic exists (first message is pronoun-only)", () => {
+    const resolved = resolveAnaphoricQuery("who created it?", []);
+    expect(resolved).toBe("who created it?");
+  });
+
+  it("full pipeline: 'what is React?' then 'who created it?' resolves and searches", async () => {
+    // After resolution, the query is "who created React?" — Wikipedia should
+    // return the React article, not the Carnatic music composers page.
+    SEARCH_RESPONSES.set(
+      "search:who created React",
+      searchResult(["React (JavaScript library)", "Facebook", "Jordan Walke"])
+    );
+    SEARCH_RESPONSES.set(
+      "lead:React (JavaScript library)",
+      "React is a free and open-source front-end JavaScript library for building user interfaces based on components. It was created by Jordan Walke, a software engineer at Facebook."
+    );
+    // The pipeline would call resolveAnaphoricQuery first, then webSearch
+    // with the resolved query.
+    const resolved = resolveAnaphoricQuery("who created it?", [
+      { role: "user", content: "What is React?" },
+      { role: "assistant", content: "React is a JavaScript library." },
+    ]);
+    expect(resolved).toBe("who created React?");
+    const result = await webSearch(resolved);
+    expect(result?.heading).toBe("React (JavaScript library)");
+    expect(result?.abstract).toContain("Jordan Walke");
+    expect(result?.abstract).not.toContain("Carnatic");
+  });
+
+  it("does not break existing office follow-up enrichment", () => {
+    // enrichSearchQuery should still work for office follow-ups.
+    const enriched = enrichSearchQuery("who is the current prime minister?", [
+      "Who is the current prime minister of India?",
+    ]);
+    expect(enriched).toBe("who is the current prime minister of india");
+  });
+
+  it("non-regression: resolveAnaphoricQuery does not touch office follow-ups", () => {
+    // "who is the current prime minister?" has no pronoun — stays unchanged.
+    const resolved = resolveAnaphoricQuery("who is the current prime minister?", [
+      { role: "user", content: "What is the capital of India?" },
+    ]);
+    expect(resolved).toBe("who is the current prime minister?");
   });
 });

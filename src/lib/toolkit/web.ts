@@ -32,6 +32,7 @@ export {
   canonicalPlaceOf,
   classifyKnowledgeQuery,
   enrichSearchQuery,
+  hasUnresolvedAnaphora,
   normalizeCurrency,
   officeLabelOf,
   officeNounOf,
@@ -45,6 +46,8 @@ export {
   parseRankQualifiedOffice,
   properNounsOf,
   queryKeywords,
+  resolveAnaphoricQuery,
+  topicSubjectOf,
   type KnowledgeQuery,
   type KnowledgeQueryKind,
 } from "./query-normalize";
@@ -1564,6 +1567,12 @@ function contentSupportsRankQualified(content: string, rq: RankQualifiedEvidence
  * but not the subject and must not win the race over the Wikipedia fallback.
  * The subject is the trailing content keyword (the head noun); a query with no
  * usable subject accepts any contentful result.
+ *
+ * When the query has been resolved from an anaphoric form (e.g. "who created
+ * React?" resolved from "who created it?"), the head noun is the resolved
+ * subject — the check verifies it appears in the result content (heading,
+ * abstract, or topics), catching obviously unrelated results before they
+ * become the answer.
  */
 function genericResultMatchesTopic(result: SearchResult, query: string): boolean {
   const keywords = queryKeywords(query);
@@ -1574,7 +1583,15 @@ function genericResultMatchesTopic(result: SearchResult, query: string): boolean
     head = keywords[keywords.length - 1];
   }
   if (!head || head.length < 3) return true;
-  return contentHasWord(searchResultContent(result), head);
+  // Check the full result content (heading + abstract + topics).
+  if (contentHasWord(searchResultContent(result), head)) return true;
+  // Defense-in-depth: also check the heading and abstract separately, so a
+  // result whose body mentions the word but whose heading is obviously
+  // unrelated is still caught.
+  const headingLower = (result.heading ?? "").toLowerCase();
+  const abstractLower = (result.abstract ?? "").toLowerCase();
+  if (contentHasWord(headingLower, head) || contentHasWord(abstractLower, head)) return true;
+  return false;
 }
 
 /**

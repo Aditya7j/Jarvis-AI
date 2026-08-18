@@ -49,7 +49,7 @@ import { extractDateTokens } from "@/lib/time/date-calc";
 import type { VisionFrameInput } from "@/lib/vision/vision-manager";
 import type { AIMessageInput } from "@/lib/ai/types";
 import { parseConversionRequest } from "@/lib/toolkit/convert";
-import { classifyKnowledgeQuery, enrichSearchQuery, isContentfulTopicText, normalizeCurrency, parseCurrencyRequest } from "@/lib/toolkit/web";
+import { classifyKnowledgeQuery, enrichSearchQuery, isContentfulTopicText, normalizeCurrency, parseCurrencyRequest, resolveAnaphoricQuery } from "@/lib/toolkit/web";
 import { getContextEngine } from "@/services/context/context-engine";
 import type { BatteryFact, WeatherFact } from "@/lib/ai/system-tools";
 import {
@@ -1924,13 +1924,26 @@ export async function* runPipeline(
         toolsToRun = ["web_search"];
         argFor = () => {
           // Carry conversational context into the query: a follow-up like
-          // "who is the current prime minister?" after "...of india?" reuses
-          // the place from the earlier turn instead of re-searching in a void.
+          // "who created it?" after "what is React?" reuses the topic from
+          // the earlier turn instead of searching with unresolved pronouns.
+          // First resolve anaphoric pronouns (it/that/this/them → the
+          // established topic), then apply the office/place enrichment.
+          const allContext = messages
+            .filter((m) => m.role === "user" || m.role === "assistant")
+            .map((m) => ({
+              role: m.role,
+              content: typeof m.content === "string" ? m.content : "",
+            }))
+            .filter((m) => m.content);
+          const resolved = resolveAnaphoricQuery(
+            stripPrefix(q, SEARCH_PREFIXES) || q,
+            allContext
+          );
           const priorUser = messages
             .filter((m) => m.role === "user")
             .map((m) => (typeof m.content === "string" ? m.content : ""))
             .filter(Boolean);
-          return { query: enrichSearchQuery(stripPrefix(q, SEARCH_PREFIXES) || q, priorUser) };
+          return { query: enrichSearchQuery(resolved, priorUser) };
         };
       }
       break;

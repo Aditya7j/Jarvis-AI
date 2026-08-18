@@ -258,6 +258,227 @@ export const FACT_LOOKUP_TERMS: readonly string[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Anaphora resolution — pronoun-bearing follow-ups
+// ---------------------------------------------------------------------------
+
+/**
+ * Pronouns that refer back to a prior topic and must be resolved before
+ * the query reaches web_search. Covers English ("it", "that", "them") and
+ * Hinglish ("iska", "uska", "yeh", "woh").
+ */
+const ANAPHORIC_PRONOUNS =
+  /\b(?:it|its|that|this|them|their|they)\b/i;
+const HINGLISH_ANAPHORIC =
+  /\b(?:iska|uska|iski|uski|yeh|woh|ye|wo|iska\b|uska\b)/i;
+
+/**
+ * Whether the current query contains an unresolved pronoun that likely refers
+ * to a prior topic. A query with an explicit subject ("who created React?")
+ * is self-contained; one with only a pronoun ("who created it?") needs context.
+ */
+export function hasUnresolvedAnaphora(query: string): boolean {
+  const text = normalizeQueryText(query);
+  if (!ANAPHORIC_PRONOUNS.test(text) && !HINGLISH_ANAPHORIC.test(text)) return false;
+  // If the query already names a proper-noun subject, it is self-contained.
+  const nouns = properNounsOf(query);
+  if (nouns.length > 0) return false;
+  // If the query contains "of <place>" it's an office follow-up handled elsewhere.
+  if (/\bof\s+[a-z][a-z\s]{1,40}\s*[?.]?\s*$/i.test(text)) return false;
+  return true;
+}
+
+/**
+ * Extract the most recent topic/subject from conversation history.
+ *
+ * Strategy (in order of priority):
+ *   1. Structured "what is/are X?" / "who is X?" / "tell me about X" in the
+ *      most recent user message — X is the full subject including modifiers.
+ *   2. The last proper noun (capitalized word not at sentence start) in the
+ *      most recent user message — e.g. "How does it compare to Java?" → "Java".
+ *   3. Structured patterns in older messages (reverse order).
+ *   4. The last proper noun across all messages (reverse order).
+ *   5. The last content-rich phrase (≥3 content words) from a user message.
+ *
+ * Returns null when no confident subject can be identified.
+ */
+export function topicSubjectOf(messages: Array<{ role: string; content: string }>): string | null {
+  // Strategy 1+2: Check the most recent user message first.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "user" || !msg.content) continue;
+    const text = msg.content.trim();
+
+    // 1a. "what is/are X?" / "what's X?" / "what does X do?"
+    const whatMatch = text.match(
+      /\bwhat\s+(?:is|are|'s|does)\s+(?:the\s+|an?\s+)?(.+?)(?:\s+do\b|\s*\??\s*$)/i
+    );
+    if (whatMatch) {
+      const subject = whatMatch[1].trim().replace(/\s*\?\s*$/, "");
+      if (subject.length >= 2 && !ANAPHORIC_PRONOUNS.test(subject) && !HINGLISH_ANAPHORIC.test(subject)) {
+        return subject;
+      }
+    }
+    // 1b. "who is/are/was/were X?" / "who created/made/founded X?"
+    const whoMatch = text.match(
+      /\bwho\s+(?:is|are|was|were|created|made|founded|built|invented|developed)\s+(?:the\s+|an?\s+)?(.+?)\s*\??\s*$/i
+    );
+    if (whoMatch) {
+      const subject = whoMatch[1].trim().replace(/\s*\?\s*$/, "");
+      if (subject.length >= 2 && !ANAPHORIC_PRONOUNS.test(subject) && !HINGLISH_ANAPHORIC.test(subject)) {
+        return subject;
+      }
+    }
+    // 1c. "tell me about X"
+    const aboutMatch = text.match(/\btell\s+me\s+about\s+(.+?)\s*\??\s*$/i);
+    if (aboutMatch) {
+      const subject = aboutMatch[1].trim().replace(/\s*\?\s*$/, "");
+      if (subject.length >= 2 && !ANAPHORIC_PRONOUNS.test(subject) && !HINGLISH_ANAPHORIC.test(subject)) {
+        return subject;
+      }
+    }
+    // 1d. Hinglish: "X kya hai?" / "X kya hota hai?"
+    const hinglishWhat = text.match(
+      /^(.+?)\s+kya\s+(?:hai|hain|tha|thi|hot[ae]?)\s*[?.]?\s*$/i
+    );
+    if (hinglishWhat) {
+      const subject = hinglishWhat[1].trim();
+      if (subject.length >= 2 && !HINGLISH_ANAPHORIC.test(subject)) {
+        return subject;
+      }
+    }
+    // 1e. Hinglish: "X kaun hai?" / "X ke baare mein batao"
+    const hinglishWho = text.match(
+      /^(.+?)\s+kaun\s+(?:hai|hain|tha|thi)\s*[?.]?\s*$/i
+    );
+    if (hinglishWho) {
+      const subject = hinglishWho[1].trim();
+      if (subject.length >= 2 && !HINGLISH_ANAPHORIC.test(subject)) {
+        return subject;
+      }
+    }
+
+    // 2. Last proper noun in this message (preserving original casing).
+    // "How does it compare to Java?" → "Java"
+    const words = text.match(/[A-Z][a-zA-Z]+/g) ?? [];
+    const first = text.split(/\s+/)[0];
+    const filtered = words
+      .filter((w) => w !== first)
+      .filter((w) => !["Who", "What", "When", "Where", "Why", "How", "The"].includes(w));
+    if (filtered.length > 0) return filtered[filtered.length - 1];
+    break; // Only check the MOST RECENT user message for proper nouns.
+  }
+
+  // 3. Structured patterns in older messages (reverse order).
+  for (let i = messages.length - 2; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg.content || msg.role !== "user") continue;
+    const text = msg.content.trim();
+
+    const whatMatch = text.match(
+      /\bwhat\s+(?:is|are|'s|does)\s+(?:the\s+|an?\s+)?(.+?)(?:\s+do\b|\s*\??\s*$)/i
+    );
+    if (whatMatch) {
+      const subject = whatMatch[1].trim().replace(/\s*\?\s*$/, "");
+      if (subject.length >= 2 && !ANAPHORIC_PRONOUNS.test(subject) && !HINGLISH_ANAPHORIC.test(subject)) {
+        return subject;
+      }
+    }
+    const whoMatch = text.match(
+      /\bwho\s+(?:is|are|was|were|created|made|founded|built|invented|developed)\s+(?:the\s+|an?\s+)?(.+?)\s*\??\s*$/i
+    );
+    if (whoMatch) {
+      const subject = whoMatch[1].trim().replace(/\s*\?\s*$/, "");
+      if (subject.length >= 2 && !ANAPHORIC_PRONOUNS.test(subject) && !HINGLISH_ANAPHORIC.test(subject)) {
+        return subject;
+      }
+    }
+    const aboutMatch = text.match(/\btell\s+me\s+about\s+(.+?)\s*\??\s*$/i);
+    if (aboutMatch) {
+      const subject = aboutMatch[1].trim().replace(/\s*\?\s*$/, "");
+      if (subject.length >= 2 && !ANAPHORIC_PRONOUNS.test(subject) && !HINGLISH_ANAPHORIC.test(subject)) {
+        return subject;
+      }
+    }
+    const hinglishWhat = text.match(
+      /^(.+?)\s+kya\s+(?:hai|hain|tha|thi|hot[ae]?)\s*[?.]?\s*$/i
+    );
+    if (hinglishWhat) {
+      const subject = hinglishWhat[1].trim();
+      if (subject.length >= 2 && !HINGLISH_ANAPHORIC.test(subject)) {
+        return subject;
+      }
+    }
+    const hinglishWho = text.match(
+      /^(.+?)\s+kaun\s+(?:hai|hain|tha|thi)\s*[?.]?\s*$/i
+    );
+    if (hinglishWho) {
+      const subject = hinglishWho[1].trim();
+      if (subject.length >= 2 && !HINGLISH_ANAPHORIC.test(subject)) {
+        return subject;
+      }
+    }
+  }
+
+  // 4. Last proper noun across all messages (reverse order, preserving casing).
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const text = messages[i].content?.trim() ?? "";
+    if (!text) continue;
+    const words = text.match(/[A-Z][a-zA-Z]+/g) ?? [];
+    const first = text.split(/\s+/)[0];
+    const filtered = words
+      .filter((w) => w !== first)
+      .filter((w) => !["Who", "What", "When", "Where", "Why", "How", "The"].includes(w));
+    if (filtered.length > 0) return filtered[filtered.length - 1];
+  }
+
+  // 5. Last content-rich phrase (≥3 content words) from a user message.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "user") continue;
+    const keywords = queryKeywords(msg.content ?? "");
+    if (keywords.length >= 3) {
+      return keywords[keywords.length - 1];
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Conversation-aware anaphora resolution: when the current question contains
+ * an unresolved pronoun ("who created it?", "how does that work?") and a prior
+ * turn established a topic, substitute the pronoun with the resolved subject
+ * so the search query is grounded.
+ *
+ * Returns the enriched query, or the original query unchanged when no prior
+ * topic can be confidently identified.
+ */
+export function resolveAnaphoricQuery(
+  query: string,
+  allMessages: Array<{ role: string; content: string }>
+): string {
+  if (!hasUnresolvedAnaphora(query)) return query;
+  const subject = topicSubjectOf(allMessages);
+  if (!subject) return query;
+  // Replace the first anaphoric pronoun with the resolved subject.
+  // The subject preserves its original casing from the conversation history
+  // (e.g. "React" from "What is React?" — never lowercased).
+  const patterns: Array<RegExp> = [
+    // English: "who created it?" → "who created React?"
+    /\b(it|its|that|this|them|their|they)\b/i,
+    // Hinglish: "iska kaun hai?" → "React kaun hai?"
+    /\b(iska|uska|iski|uski|yeh|woh|ye|wo)\b/i,
+  ];
+  for (const pattern of patterns) {
+    const match = query.match(pattern);
+    if (match) {
+      return query.replace(pattern, subject);
+    }
+  }
+  return query;
+}
+
+// ---------------------------------------------------------------------------
 // Currency request parsing
 // ---------------------------------------------------------------------------
 

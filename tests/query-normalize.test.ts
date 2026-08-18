@@ -18,6 +18,7 @@ import {
   displayTitle,
   enrichSearchQuery,
   escapeRegExp,
+  hasUnresolvedAnaphora,
   levenshtein,
   normalizeCurrency,
   normalizeQueryText,
@@ -33,9 +34,11 @@ import {
   parseRankQualifiedOffice,
   properNounsOf,
   queryKeywords,
+  resolveAnaphoricQuery,
   titleCase,
   tokenInTitle,
   tokenizeWords,
+  topicSubjectOf,
 } from "@/lib/toolkit/query-normalize";
 
 describe("normalizeQueryText", () => {
@@ -489,5 +492,185 @@ describe("shared vocabularies", () => {
   it("exposes Hinglish particles", () => {
     expect(HINGLISH_PARTICLES.has("kya")).toBe(true);
     expect(HINGLISH_PARTICLES.has("hai")).toBe(true);
+  });
+});
+
+describe("hasUnresolvedAnaphora", () => {
+  it("detects English pronouns in follow-up queries", () => {
+    expect(hasUnresolvedAnaphora("who created it?")).toBe(true);
+    expect(hasUnresolvedAnaphora("when was that released?")).toBe(true);
+    expect(hasUnresolvedAnaphora("how does this work?")).toBe(true);
+    expect(hasUnresolvedAnaphora("why is it popular?")).toBe(true);
+    expect(hasUnresolvedAnaphora("who founded them?")).toBe(true);
+  });
+
+  it("detects Hinglish pronouns", () => {
+    expect(hasUnresolvedAnaphora("iska kaun hai?")).toBe(true);
+    expect(hasUnresolvedAnaphora("uska kya hai?")).toBe(true);
+    expect(hasUnresolvedAnaphora("yeh kisne banaya?")).toBe(true);
+  });
+
+  it("rejects self-contained queries with explicit subjects", () => {
+    expect(hasUnresolvedAnaphora("who created React?")).toBe(false);
+    expect(hasUnresolvedAnaphora("what is JavaScript?")).toBe(false);
+    expect(hasUnresolvedAnaphora("when was Python released?")).toBe(false);
+  });
+
+  it("rejects office follow-ups (handled by enrichSearchQuery)", () => {
+    expect(hasUnresolvedAnaphora("who is the current prime minister of india?")).toBe(false);
+    expect(hasUnresolvedAnaphora("what is the capital of france?")).toBe(false);
+  });
+
+  it("rejects queries with no pronouns", () => {
+    expect(hasUnresolvedAnaphora("tell me about quantum physics")).toBe(false);
+    expect(hasUnresolvedAnaphora("search for machine learning")).toBe(false);
+  });
+});
+
+describe("topicSubjectOf", () => {
+  it("extracts subject from 'what is X?' patterns", () => {
+    expect(
+      topicSubjectOf([
+        { role: "user", content: "What is React?" },
+      ])
+    ).toBe("React");
+  });
+
+  it("extracts subject from 'who is X?' patterns", () => {
+    expect(
+      topicSubjectOf([
+        { role: "user", content: "Who is Albert Einstein?" },
+      ])
+    ).toBe("Albert Einstein");
+  });
+
+  it("extracts subject from 'tell me about X' patterns", () => {
+    expect(
+      topicSubjectOf([
+        { role: "user", content: "Tell me about machine learning" },
+      ])
+    ).toBe("machine learning");
+  });
+
+  it("extracts subject from Hinglish 'X kya hai?' patterns", () => {
+    expect(
+      topicSubjectOf([
+        { role: "user", content: "React kya hai?" },
+      ])
+    ).toBe("React");
+  });
+
+  it("extracts subject from Hinglish 'X kaun hai?' patterns", () => {
+    expect(
+      topicSubjectOf([
+        { role: "user", content: "Modi kaun hai?" },
+      ])
+    ).toBe("Modi");
+  });
+
+  it("uses the most recent topic in multi-turn conversation", () => {
+    expect(
+      topicSubjectOf([
+        { role: "user", content: "What is React?" },
+        { role: "assistant", content: "React is a JavaScript library." },
+        { role: "user", content: "What is Vue?" },
+      ])
+    ).toBe("Vue");
+  });
+
+  it("falls back to proper nouns when no structured pattern matches", () => {
+    expect(
+      topicSubjectOf([
+        { role: "user", content: "Tell me about Python programming" },
+        { role: "assistant", content: "Python is a versatile language." },
+        { role: "user", content: "How does it compare to Java?" },
+      ])
+    ).toBe("Java");
+  });
+
+  it("returns null when no topic can be identified", () => {
+    expect(topicSubjectOf([])).toBeNull();
+    expect(topicSubjectOf([{ role: "user", content: "hi" }])).toBeNull();
+  });
+});
+
+describe("resolveAnaphoricQuery", () => {
+  it("resolves 'who created it?' to 'who created React?'", () => {
+    const result = resolveAnaphoricQuery("who created it?", [
+      { role: "user", content: "What is React?" },
+      { role: "assistant", content: "React is a JavaScript library." },
+    ]);
+    expect(result).toBe("who created React?");
+  });
+
+  it("resolves 'when was it released?' to 'when was React released?'", () => {
+    const result = resolveAnaphoricQuery("when was it released?", [
+      { role: "user", content: "What is React?" },
+    ]);
+    expect(result).toBe("when was React released?");
+  });
+
+  it("resolves 'how does it work?' to 'how does React work?'", () => {
+    const result = resolveAnaphoricQuery("how does it work?", [
+      { role: "user", content: "What is React?" },
+    ]);
+    expect(result).toBe("how does React work?");
+  });
+
+  it("resolves 'why is it popular?' to 'why is React popular?'", () => {
+    const result = resolveAnaphoricQuery("why is it popular?", [
+      { role: "user", content: "What is React?" },
+    ]);
+    expect(result).toBe("why is React popular?");
+  });
+
+  it("resolves Hinglish 'iska kaun hai?' to 'React kaun hai?'", () => {
+    const result = resolveAnaphoricQuery("iska kaun hai?", [
+      { role: "user", content: "React kya hai?" },
+    ]);
+    expect(result).toBe("React kaun hai?");
+  });
+
+  it("leaves self-contained queries unchanged", () => {
+    const result = resolveAnaphoricQuery("who created React?", [
+      { role: "user", content: "What is React?" },
+    ]);
+    expect(result).toBe("who created React?");
+  });
+
+  it("leaves queries unchanged when no prior topic exists", () => {
+    const result = resolveAnaphoricQuery("who created it?", []);
+    expect(result).toBe("who created it?");
+  });
+
+  it("does not break existing office follow-ups", () => {
+    const result = resolveAnaphoricQuery("who is the current prime minister?", [
+      { role: "user", content: "What is the capital of India?" },
+    ]);
+    // Not an office follow-up with "of <place>", so it stays unchanged.
+    expect(result).toBe("who is the current prime minister?");
+  });
+
+  it("handles different topics across turns", () => {
+    const result = resolveAnaphoricQuery("who created it?", [
+      { role: "user", content: "What is Python?" },
+      { role: "assistant", content: "Python is a programming language." },
+      { role: "user", content: "Who created it?" },
+    ]);
+    expect(result).toBe("who created Python?");
+  });
+
+  it("handles 'that' pronoun", () => {
+    const result = resolveAnaphoricQuery("when was that released?", [
+      { role: "user", content: "What is Vue.js?" },
+    ]);
+    expect(result).toBe("when was Vue.js released?");
+  });
+
+  it("handles 'them' pronoun", () => {
+    const result = resolveAnaphoricQuery("who founded them?", [
+      { role: "user", content: "What are the FAANG companies?" },
+    ]);
+    expect(result).toBe("who founded FAANG companies?");
   });
 });
